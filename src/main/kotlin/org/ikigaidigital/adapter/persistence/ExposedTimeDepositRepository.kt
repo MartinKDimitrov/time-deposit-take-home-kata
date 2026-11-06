@@ -16,6 +16,13 @@ class ExposedTimeDepositRepository : TimeDepositRepository {
             .orderBy(TimeDepositsTable.id)
             .map { it.toTimeDeposit() }
 
+    // Locking in id order keeps the lock order the same for every caller, so two updates cannot deadlock.
+    override fun findAllForUpdate(): List<TimeDeposit> =
+        TimeDepositsTable.selectAll()
+            .orderBy(TimeDepositsTable.id)
+            .forUpdate()
+            .map { it.toTimeDeposit() }
+
     override fun updateBalances(timeDeposits: List<TimeDeposit>) {
         timeDeposits.forEach { deposit ->
             TimeDepositsTable.update(where = { TimeDepositsTable.id eq deposit.id }) {

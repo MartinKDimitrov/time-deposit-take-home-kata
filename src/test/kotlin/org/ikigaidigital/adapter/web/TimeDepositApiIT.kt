@@ -19,6 +19,8 @@ import org.junit.jupiter.api.Test
 import org.testcontainers.postgresql.PostgreSQLContainer
 import java.math.BigDecimal
 import java.sql.DriverManager
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
 /** HTTP -> routes -> use cases -> Exposed -> PostgreSQL in Docker. Every response is checked against the contract. */
 class TimeDepositApiIT {
@@ -70,6 +72,15 @@ class TimeDepositApiIT {
     @Test
     fun `POST is not idempotent - every call adds another month`() = apiTest {
         repeat(2) { client.post("/time-deposits/balance-updates") }
+
+        assertThat(balances()[1]).isEqualByComparingTo("1001.66")
+    }
+
+    @Test
+    fun `concurrent POSTs each add a month - no update is lost`() = apiTest {
+        coroutineScope {
+            repeat(2) { launch { client.post("/time-deposits/balance-updates") } }
+        }
 
         assertThat(balances()[1]).isEqualByComparingTo("1001.66")
     }

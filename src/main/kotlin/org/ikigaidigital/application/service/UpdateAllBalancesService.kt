@@ -12,7 +12,7 @@ class UpdateAllBalancesService(
 ) : UpdateAllBalancesUseCase {
 
     override fun updateAllBalances() = transactionRunner.inTransaction {
-        val timeDeposits = timeDepositRepository.findAll()
+        val timeDeposits = timeDepositRepository.findAllForUpdate()
         calculator.updateBalance(timeDeposits)
         timeDepositRepository.updateBalances(timeDeposits)
     }

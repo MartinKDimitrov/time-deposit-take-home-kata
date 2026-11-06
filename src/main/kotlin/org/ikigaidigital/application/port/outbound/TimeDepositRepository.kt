@@ -8,4 +8,7 @@ interface TimeDepositRepository {
 
     /** Persists only the balances of the given deposits. */
     fun updateBalances(timeDeposits: List<TimeDeposit>)
+
+    /** All time deposits, ordered by id, locked until the transaction ends so concurrent balance updates run one after another. */
+    fun findAllForUpdate(): List<TimeDeposit>
 }
