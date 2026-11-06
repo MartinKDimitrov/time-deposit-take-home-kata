@@ -1,12 +1,13 @@
 ---
-description: Before git push - run the review agents that the not-yet-pushed commits actually need
-argument-hint: "[full] [base-ref]"
+description: Review agents chosen by what changed. Runs automatically from the pre-push hook; can also be run by hand
+argument-hint: "[auto] [full] [<base>..<tip> | <base-ref>]"
 ---
 
 Run the AI quality gate on a commit range. Arguments: $ARGUMENTS
 
 1. **Range.**
-   - Default, before a push: the commits not yet pushed, `@{upstream}..HEAD`. Without an upstream, use
+   - An explicit range `<base>..<tip>` in the arguments wins (the pre-push hook always passes one).
+   - Otherwise the commits not yet pushed, `@{upstream}..HEAD`; without an upstream,
      `$(git merge-base HEAD origin/HEAD)..HEAD`.
    - `full`, before handover or release: everything since the base ref given in the arguments, otherwise since
      `git merge-base HEAD origin/HEAD`.
@@ -41,10 +42,12 @@ Run the AI quality gate on a commit range. Arguments: $ARGUMENTS
    Cost follows scope, not a size threshold: pass every agent only the files of its class, so a small change gets
    a small review.
 
-4. **Show the plan** – each class found with the files that triggered it, the agents chosen and a one-line
-   reason – and wait for confirmation.
+4. **Plan.** Show each class found with the files that triggered it, the agents chosen and a one-line reason.
+   With `auto` in the arguments (the pre-push hook) continue immediately and never ask questions; otherwise wait
+   for confirmation.
 
-5. **Run.** Agents that only read may run in parallel; agents that build or run tests run one after another.
+5. **Run.** Agents that only read may run in parallel. Agents that build or run tests (test-quality,
+   regression-hunt, verify-findings-closed) run one after another, each in its own worktree.
    Pass each agent the exact range and its files.
 
 6. **Summarize** in at most 15 lines: per agent the verdict and its top findings, with a link to

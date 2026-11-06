@@ -1,14 +1,79 @@
 #!/bin/sh
-# Full gate before code leaves the machine: unit + integration tests with Testcontainers (Docker must be running).
-# Skipped when the pushed commits touch no code or build file. Bypass once with: git push --no-verify
+# Runs when the pushed commits touch code or build files:
+#   1. make verify - unit + integration tests with Testcontainers (Docker must be running)
+#   2. AI quality gate - review agents chosen by what the pushed commits changed (Claude Code, headless)
+# After an AI review that wrote reports the push stops: review them, commit them, push again.
+# Bypass: SKIP_AI_GATE=1 git push (skips only the AI review) | git push --no-verify (skips everything)
+
 zero=0000000000000000000000000000000000000000
-run=no
+code_paths="src pom.xml .mvn Makefile"
+
+base=""
+tip=""
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$zero" ] && continue # branch deletion
-  if [ "$remote_sha" = "$zero" ] || ! git diff --quiet "$remote_sha" "$local_sha" -- src pom.xml .mvn Makefile 2>/dev/null; then
-    run=yes
+  if [ "$remote_sha" = "$zero" ] || ! git cat-file -e "$remote_sha" 2>/dev/null; then
+    remote_sha=$(git merge-base "$local_sha" origin/HEAD 2>/dev/null || git rev-list --max-parents=0 "$local_sha" | tail -n 1)
   fi
+  base=$remote_sha
+  tip=$local_sha
 done
-[ "$run" = "no" ] && exit 0
+[ -z "$tip" ] && exit 0
+
+touches_code() { ! git diff --quiet "$1" "$2" -- $code_paths; }
+
+touches_code "$base" "$tip" || exit 0
+
 echo "pre-push: make verify"
 make verify || { echo "pre-push: verification failed - push aborted"; exit 1; }
+
+if [ "$SKIP_AI_GATE" = "1" ]; then
+  echo "pre-push: AI review skipped (SKIP_AI_GATE=1)"
+  exit 0
+fi
+
+# Review only what has not been reviewed yet (e.g. the fix: commits after an earlier review).
+state="$(git rev-parse --git-dir)/ai-gate-reviewed"
+review_base=$base
+if [ -f "$state" ]; then
+  reviewed=$(cat "$state")
+  if git merge-base --is-ancestor "$base" "$reviewed" 2>/dev/null &&
+     git merge-base --is-ancestor "$reviewed" "$tip" 2>/dev/null; then
+    review_base=$reviewed
+  fi
+fi
+if ! touches_code "$review_base" "$tip"; then
+  echo "pre-push: AI review already done for these changes"
+  exit 0
+fi
+
+continue_without_ai() {
+  echo "pre-push: $1"
+  echo "pre-push: NOT run: AI review agents (/quality-gate). Already passed: make verify."
+  if (exec </dev/tty) 2>/dev/null; then
+    printf "Continue the push without the AI review? [y/N] " >/dev/tty
+    read -r answer </dev/tty
+    case "$answer" in
+      y | Y | yes | YES) echo "pre-push: continuing without AI review"; exit 0 ;;
+    esac
+  fi
+  echo "pre-push: push aborted. To push without the AI review: SKIP_AI_GATE=1 git push"
+  exit 1
+}
+
+command -v claude >/dev/null 2>&1 ||
+  continue_without_ai "Claude Code (claude) is not installed or not on PATH."
+curl -s -m 5 -o /dev/null https://api.anthropic.com 2>/dev/null ||
+  continue_without_ai "No connection to Claude (api.anthropic.com is unreachable)."
+
+echo "pre-push: AI review of $review_base..$tip - this takes a few minutes"
+claude -p "/quality-gate auto $review_base..$tip" --permission-mode auto ||
+  continue_without_ai "The AI review did not complete (see the messages above)."
+
+echo "$tip" >"$state"
+if [ -n "$(git status --porcelain -- docs/ai-reviews)" ]; then
+  echo "pre-push: AI review reports were written to docs/ai-reviews/."
+  echo "pre-push: Review them, fix or record the findings, commit the reports and run git push again."
+  exit 1
+fi
+echo "pre-push: AI review found nothing to report"
