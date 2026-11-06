@@ -60,5 +60,5 @@ Be blunt. The author would rather find out now.
 - **Cheapest check first.** Use the project's fast, targeted test command (see `CLAUDE.md`) for the affected area.
   Run the full verification command at most once per review. Never clean build output or caches of the main checkout.
 - **No long-running processes.** Never start the application or anything that binds a port; stop every process you start.
-- **Bounded output.** At most 10 findings, most severe first, each with `file:line` and the evidence.
+- **Bounded output.** At most 10 findings, most severe first. Each finding is a heading `### <n>. <Severity> — <one-line title>` followed by at most four bullets: **Where** (`file:line`), **Problem**, **Why it matters**, **Action**. No narrative paragraphs.
   Write the full report to `docs/ai-reviews/<agent-name>.md` and return a summary of at most 5 lines.
