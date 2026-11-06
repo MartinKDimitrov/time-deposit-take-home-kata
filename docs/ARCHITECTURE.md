@@ -30,14 +30,17 @@ kotlinx.serialization.
 
 | Package | Contents | Depends on |
 | --- | --- | --- |
-| `org.ikigaidigital` | `TimeDeposit`, `TimeDepositCalculator` – the shared classes, kept in their original package; `Application.kt` (entry point) | domain |
-| `domain` | `Withdrawal`, `Double.toMoney()`, `interest/InterestPolicy` and one policy per plan | nothing |
+| `org.ikigaidigital` | `TimeDeposit`, `TimeDepositCalculator` – the shared classes, kept in their original package; `Application.kt` (entry point) | `domain/interest`; `Application.kt` also `config`, `adapter/persistence` and Ktor |
+| `domain` | `Withdrawal`, `Double.toMoney()`, `interest/InterestPolicy` and one policy per plan | `TimeDeposit` in the root package¹ |
 | `application/port/inbound` | `GetAllTimeDepositsUseCase`, `UpdateAllBalancesUseCase` | domain |
 | `application/port/outbound` | `TimeDepositRepository`, `WithdrawalRepository`, `TransactionRunner` | domain |
 | `application/service` | the two use case implementations | ports, domain |
-| `adapter/web` | routes, response DTOs, mapping, the money serializer | inbound ports |
-| `adapter/persistence` | Exposed tables, repositories, `ExposedTransactionRunner`, Hikari pool and Flyway | outbound ports |
+| `adapter/web` | routes, response DTOs, mapping, the money serializer | inbound ports, domain |
+| `adapter/persistence` | Exposed tables, repositories, `ExposedTransactionRunner`, Hikari pool and Flyway | outbound ports, domain |
 | `config` | `timeDepositModule`: creates everything and installs the routes and Swagger UI | everything |
+
+¹ The two shared classes must stay in the root package, so the root package and `domain/interest` reference each
+other. There is no cycle between classes, and neither side imports a framework.
 
 For readers who think in Clean Architecture terms, the same structure maps one to one:
 
@@ -97,7 +100,10 @@ caller, so two updates cannot deadlock.
 - **Flyway owns the schema** (`src/main/resources/db/migration`); Exposed only maps it. Tables are `time_deposits`
   and `withdrawals` with snake_case columns, money as `NUMERIC(19,2)`, and a foreign key from withdrawals to deposits.
 - **Money:** the shared `TimeDeposit` keeps its balance as `Double`. At the database boundary it is converted with
-  `toMoney()` (two decimals, half-up) on write and `toDouble()` on read.
+  `toMoney()` (two decimals, half-up) on write and `toDouble()` on read. `toMoney()` uses `BigDecimal.valueOf`, the
+  shortest decimal form of the `Double`, because the balance is already a cent value; the calculator uses
+  `BigDecimal(Double)` on purpose, to reproduce the original rounding of the interest. Withdrawal amounts never pass
+  through a `Double`: they are read from `NUMERIC(19,2)` as `BigDecimal` and returned as they are.
 - **Connections:** HikariCP pool, closed when the application stops.
 
 ## Contract first
@@ -105,14 +111,14 @@ caller, so two updates cannot deadlock.
 The OpenAPI contract is written first and is the single source of truth. Ktor has no generator that produces only
 interfaces, so the guarantee comes from the tests instead: every integration test validates the response against the
 contract (`swagger-request-validator`), with `additionalProperties: false`, so an extra, missing or mistyped field
-fails the build. Swagger UI serves the same file.
+fails the build. Swagger UI serves the same file at `/swagger`; it is the only route besides the two endpoints.
 
 ## Tests
 
 | Level | What | How |
 | --- | --- | --- |
 | Unit (`*Test`, `make test`) | `updateBalance` behaviour | Characterization tests written against the original code before the refactoring: plan boundaries, rounding mode, arithmetic order, plan type matching, extensibility |
-| Integration (`*IT`, `make verify`) | HTTP → use cases → Exposed → PostgreSQL | Ktor `testApplication` with PostgreSQL in Testcontainers; full JSON comparison and contract validation; a lock test that holds row locks from a second connection |
+| Integration (`*IT`, `make verify`) | HTTP → use cases → Exposed → PostgreSQL | Ktor `testApplication` with PostgreSQL in Testcontainers; full JSON comparison and contract validation; two lock tests: one holds the row locks from a second connection and checks that an update waits and builds on the change, one runs two updates at once and expects both months |
 
 There are no mocks: the domain has no dependencies, and the integration tests use the real database.
 

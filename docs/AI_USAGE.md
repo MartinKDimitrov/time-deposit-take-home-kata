@@ -7,7 +7,7 @@ How AI was used to build this service, how to reproduce the setup, and which par
 | Tool | Used for |
 | --- | --- |
 | **Claude** (Anthropic, Opus models) in the Claude desktop app | Pair work in a conversation: analysing the assignment, planning, a step-by-step implementation guide with proposed code for each step, discussed and adjusted together before it was typed, the quality tooling, the documentation, triage of review findings. Through the desktop app it could read the repository folder, check staged changes and write the tooling and documentation files. |
-| **Claude Code** CLI (v2.1.177) | Runs the review agents headless (`claude -p`) from the pre-push hook, and interactively for `/quality-gate full`. Models are chosen by alias: `sonnet` for the quick review on push, because it is faster and cheaper for a review that runs many times a day; `opus` for the thorough review that runs once before handover. |
+| **Claude Code** CLI (2.1; last run with 2.1.319) | Runs the review agents headless (`claude -p`): from the pre-push hook, and once for `/quality-gate full` before handover. Models are chosen by alias: `sonnet` for the quick review on push, because it is faster and cheaper for a review that runs many times a day; `opus` for the thorough review that runs once before handover (the docs audit runs on `sonnet` there too). |
 | IntelliJ IDEA | Writing, running and debugging the code. |
 
 ## The harness
@@ -24,7 +24,7 @@ Everything that defines the AI setup is in the repository:
 | [`Makefile`](../Makefile) | The single entry point for build and test commands, used by humans, hooks and agents alike |
 
 The agents and commands are written to be project-independent: everything project-specific comes from `CLAUDE.md`.
-The same files live in `~/.claude/` for use in other repositories.
+They can be copied to `~/.claude/` to use them in other repositories.
 
 ### When what runs
 
@@ -32,7 +32,7 @@ The same files live in `~/.claude/` for use in other repositories.
 | --- | --- | --- |
 | `git commit` (code or build files staged) | `make test` | seconds |
 | `git push` (code or build files changed) | `make verify`, then `claude -p "/quality-gate auto <range>"` in **push mode**: only the quick agents (`adversarial-code`, `test-quality`, `verify-findings-closed`, chosen by what changed), read-only, on Sonnet, in parallel, stopped after 3 minutes. If reports were written the push stops once, so they can be read, acted on and committed. | 1–2 minutes |
-| Handover | `/quality-gate full <base>` by hand: every relevant agent on Opus, allowed to prove findings by running code (mutations, differential tests) | longer, run once |
+| Handover | `/quality-gate full <base>` by hand: every relevant agent on its own model (Opus; Sonnet for the docs audit), allowed to prove findings by running code (mutations, differential tests) | about 20 minutes, run once |
 
 Only commits not yet reviewed are reviewed on the next push. Without Claude Code or a connection the hook says what
 will not run and asks whether to continue.
@@ -42,7 +42,9 @@ will not run and asks whether to continue.
 1. Install Claude Code and sign in (`claude`).
 2. In the repository: `make setup` (sets `core.hooksPath` to `.githooks`; Docker must be running for `make verify`).
 3. Commit and push as usual; the hooks do the rest.
-4. Before handover: `claude`, then `/quality-gate full upstream/main`.
+4. Before handover: `claude -p "/quality-gate auto full <base>..HEAD" --permission-mode auto`, where `<base>` is the
+   last commit of the original repository (here `c4ea358`). Inside an interactive `claude` session the same is
+   `/quality-gate full <base>`.
 
 `SKIP_AI_GATE=1 git push` skips only the AI review; `git push --no-verify` skips every check.
 
@@ -64,7 +66,8 @@ AI suggestions were treated as claims to verify, not as answers.
 
 - **Refactoring the calculator.** Characterization tests were written against the original code first. The
   refactored calculator was then compared with the original on 200,000 random inputs in the conversation, and by the
-  `regression-hunt` agent on about 2.5 million; there were no differences.
+  `regression-hunt` agent on about 2.5 million; there were no differences. The full review before handover repeated
+  the comparison against the original repository commit on 371,000 cases, again without a difference.
 - **Mutation testing found weak tests.** `test-quality` showed that five mutants of the rounding and arithmetic
   (`BigDecimal.valueOf`, `HALF_EVEN`, `HALF_DOWN`, two arithmetic orders) survived the first characterization tests.
   The added rows were computed independently with exact decimal arithmetic before they were committed; all mutants
@@ -73,7 +76,13 @@ AI suggestions were treated as claims to verify, not as answers.
   implementation guide, read and wrote balances without row locks. `adversarial-code` showed that two overlapping
   updates could lose a month of interest. The fix (`SELECT … FOR UPDATE`) came with a test; `test-quality` then
   showed that the test would also pass without the fix, so it was rewritten to hold the row locks from a second
-  connection. It was run with `.forUpdate()` removed (fails: 1000.83 instead of 2001.67) and restored (passes).
+  connection. It was run with `.forUpdate()` removed (fails: 1000.83 instead of 2001.67) and restored (passes). The
+  full review then showed, with a mutant, that splitting the read and the write into two transactions still passed;
+  a second test that runs two updates at once now catches it.
+- **The full review before handover** ran seven agents for about 20 minutes. It found no regression and no defect in
+  the interest rules. Its findings led to one more test, the assumptions written as code comments (the assignment
+  asks for that), and a round of corrections to these documents; the rest is recorded in
+  [`TRADEOFFS.md`](TRADEOFFS.md) with its source.
 - **Rejected findings.** Agent claims were checked before acting: "the Hikari pool is never closed per test" and
   "`.forUpdate()` has no import" were false (the logs show the pool closing; `forUpdate` is a member function and the
   build passed). They were not acted on.

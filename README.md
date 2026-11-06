@@ -1,8 +1,8 @@
 # XA Bank Time Deposit API
 
 A Kotlin service for the Ikigai Digital time deposit kata. It keeps time deposits and their withdrawals in
-PostgreSQL and exposes exactly two endpoints: one lists all deposits, the other adds one month of interest to every
-balance. The interest rules live in the original `TimeDepositCalculator.updateBalance`, whose behaviour is unchanged.
+PostgreSQL and exposes exactly two API endpoints: one lists all deposits, the other adds one month of interest to every
+balance. Swagger UI at `/swagger` serves the contract. The interest rules live in the original `TimeDepositCalculator.updateBalance`, whose behaviour is unchanged.
 
 **Stack:** Kotlin 2.3, Java 17, Ktor 3 (Netty), Exposed, PostgreSQL with Flyway, an OpenAPI 3 contract served by
 Swagger UI, Testcontainers, Maven (wrapper included).
@@ -24,7 +24,8 @@ make run
 ```
 
 This starts PostgreSQL in Docker (Testcontainers), applies the schema, loads six demo deposits and serves the API on
-port 8080. Stop it with Ctrl+C; the database container is removed automatically.
+port 8080. The demo data is a Flyway repeatable migration in `src/test/resources/db/seed`, so it never reaches a
+production database. Stop it with Ctrl+C; the database container is removed automatically.
 
 Open **http://localhost:8080/swagger**. The page shows the contract
 ([`src/main/resources/openapi/time-deposits.yaml`](src/main/resources/openapi/time-deposits.yaml)) with both
@@ -58,7 +59,8 @@ curl -s -X POST -o /dev/null -w "%{http_code}\n" http://localhost:8080/time-depo
 ### Against your own PostgreSQL
 
 `make run` is for trying the API. The production entry point, `org.ikigaidigital.ApplicationKt`, reads the database
-from `DB_URL`, `DB_USER` and `DB_PASSWORD`, runs the Flyway migrations and starts with an empty database:
+from `DB_URL`, `DB_USER` and `DB_PASSWORD`, runs the Flyway migrations and starts with an empty database. Without the variables it falls back to
+`jdbc:postgresql://localhost:5432/timedeposits` with user and password `timedeposits`, which matches this container:
 
 ```bash
 docker run -d --name timedeposits -p 5432:5432 \
@@ -66,6 +68,9 @@ docker run -d --name timedeposits -p 5432:5432 \
 DB_URL=jdbc:postgresql://localhost:5432/timedeposits DB_USER=timedeposits DB_PASSWORD=timedeposits \
   ./mvnw -q compile exec:java -Dexec.mainClass=org.ikigaidigital.ApplicationKt
 ```
+
+There is no endpoint to create deposits (the assignment allows exactly two), so data is inserted into the
+`time_deposits` and `withdrawals` tables directly.
 
 ## Build and test
 
@@ -80,8 +85,9 @@ DB_URL=jdbc:postgresql://localhost:5432/timedeposits DB_USER=timedeposits DB_PAS
   rounding mode and the arithmetic order of the original code, unknown and wrongly cased plan types, and adding a new
   plan.
 - **Integration tests** go through HTTP, the use cases and Exposed to a real PostgreSQL. Every response is validated
-  against the OpenAPI contract, so the code and the contract cannot drift apart. One test proves that two overlapping
-  balance updates cannot lose a month of interest.
+  against the OpenAPI contract, so the code and the contract cannot drift apart. Two tests cover concurrent updates:
+  one holds the row locks from a second connection and checks that an update waits and builds on the change; the
+  other runs two updates at once and expects both months of interest.
 
 ## Project layout
 

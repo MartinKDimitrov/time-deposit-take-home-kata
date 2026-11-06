@@ -23,7 +23,8 @@ All build and test commands go through `make`; agents use only these targets (`m
    fields, types, package or constructor.
 2. `TimeDepositCalculator.updateBalance(xs: List<TimeDeposit>)` keeps its signature and its exact behaviour,
    including `Double` arithmetic and `BigDecimal(Double)` + `HALF_UP` rounding. The no-arg constructor must keep working.
-3. Exactly two HTTP endpoints: `GET /time-deposits` and `POST /time-deposits/balance-updates`. No others.
+3. Exactly two API endpoints: `GET /time-deposits` and `POST /time-deposits/balance-updates`. The only other route is
+   Swagger UI at `/swagger`, which serves the contract. No others.
 4. The API is defined in `src/main/resources/openapi/time-deposits.yaml`. Change the contract first, then routes and
    DTOs; the integration tests validate every response against the contract, so the two cannot drift apart.
 5. Invalid input / exception handling is out of scope (per the assignment) – do not add it unasked.
@@ -47,7 +48,7 @@ org.ikigaidigital
 - Transactions go through the `TransactionRunner` outbound port; blocking database work runs on `Dispatchers.IO`,
   decided in the web adapter.
 - Exposed tables and DTOs never leave their adapter; map at the boundary. Wiring is manual, in `config/` only.
-- Money outside the domain is `BigDecimal` with scale 2; convert with `Double.toMoney()` only.
+- Money outside the domain is `BigDecimal` with scale 2; convert a `Double` balance with `Double.toMoney()` only.
 - `TimeDeposit` and `TimeDepositCalculator` are domain types pinned to the root package by hard constraints 1 and 2;
   treat them as domain, not as the composition level.
 - A new interest plan = a new `InterestPolicy` implementation, added to `defaultPolicies()` or injected through the

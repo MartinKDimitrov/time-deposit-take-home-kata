@@ -7,9 +7,11 @@ git history.
 
 ## Assumptions
 
-The business assumptions (A1–A6: the 30-day rule for every plan, case-sensitive plan types, the student year, `days`
-not incremented, withdrawals as history, `POST` with `204`) are listed with their reasons in
-[`PRODUCT.md`](PRODUCT.md#assumptions). A1 was raised by adversarial-architecture finding 4.
+The business assumptions (A1–A8: the 30-day rule for every plan, case-sensitive plan types, the student year, `days`
+not incremented, withdrawals as history, `POST` with `204`, the shape of `withdrawals`, annual rates) are listed with their reasons in
+[`PRODUCT.md`](PRODUCT.md#assumptions) and justified in code comments next to the code they shape (A4–A7), as the
+assignment asks. A1 was raised by adversarial-architecture finding 4; A4–A8 and the comments by spec-vs-plan (full
+review).
 
 ## Platform
 
@@ -42,11 +44,18 @@ implement, so the routes and DTOs are hand-written and the integration tests val
 contract instead. The contract therefore cannot drift silently; what it does not give is a compile error when a route
 is missing — the test fails instead.
 
+### Swagger UI is the one extra route
+
+The assignment asks for exactly two endpoints and for instructions to trigger them through the Swagger contract.
+Swagger UI at `/swagger` serves the contract and is the only other route; `CLAUDE.md` names it as the one exception.
+Source: docs-claims-audit finding 2 (full review).
+
 ### Blocking JDBC on `Dispatchers.IO`
 
 Exposed JDBC blocks, so the web adapter moves each use case call to `Dispatchers.IO`, keeping the use cases plain
 functions. `Dispatchers.IO` allows 64 threads and the Hikari pool has 10 connections; extra requests wait for a
-connection, which is acceptable at this scale. Source: adversarial-code (push review).
+connection, which is acceptable at this scale as long as each request is short. A balance update that waits for a
+row lock is not short; see "Lock waits are unbounded" below. Source: adversarial-code (push review).
 
 ## Money
 
@@ -59,6 +68,15 @@ the same results. `BigDecimal.valueOf` would be the textbook choice, but it chan
 
 A `Double` holds whole cents exactly up to about 9 × 10¹³; larger balances would lose cents. Far beyond any real
 deposit; the limit comes with the shared class. Source: adversarial-code (push review).
+
+### The balance column is wider than the `Double` path
+
+`NUMERIC(19,2)` holds up to 17 integer digits; a balance on its way through `TimeDeposit` keeps only about 15
+significant digits. Above about 9 × 10¹³ `GET` reports a rounded balance, and a balance near the column maximum makes
+the update overflow the column: `POST` returns 500 and the whole run rolls back, so no deposit gets its interest
+until that row is fixed. Capping the column at `NUMERIC(15,2)` in a new migration would make both unreachable; it was
+not done because no realistic deposit comes close, and the assignment asks only for a decimal column. Sources:
+regression-hunt findings 1–2 and adversarial-code finding 1 (full review).
 
 ### `BigDecimal` with two decimals everywhere else
 
@@ -88,14 +106,24 @@ Accepted consequences:
 ### `TimeDeposit` and `TimeDepositCalculator` stay in the root package
 
 Both are pinned by the assignment, so they stay in `org.ikigaidigital` and are treated as domain types. The root
-package and `domain/interest` reference each other; there is no class-level cycle. Source: adversarial-architecture
-findings 1 and 10.
+package and `domain/interest` reference each other; there is no class-level cycle. `Application.kt` (the entry point)
+also lives in the root package and imports `config`, so the root package is the one place that touches every layer;
+moving `main()` to `config/` would leave only the two shared classes there. Kept for a conventional entry point.
+Sources: adversarial-architecture findings 1 and 10 (push review), finding 1 (full review).
 
 ### No layering test
 
 The dependency rule (nothing in `domain/` or `application/` imports Ktor or Exposed) is checked by review, not by a
 test. An ArchUnit or Konsist test is the first follow-up worth adding now that the adapters exist; it was left out to
-keep the dependency list short. Source: adversarial-architecture finding 10.
+keep the dependency list short. The same holds for a linter, a coverage floor and a dependency audit: the hooks run
+the tests only. Sources: adversarial-architecture finding 10 (push review), finding 4 (full review).
+
+### Repositories depend on an open transaction
+
+The outbound ports look like plain interfaces, but the Exposed implementations only work inside the transaction
+opened by `TransactionRunner`. This is stated in the KDoc of each port rather than in the type system (for example by
+passing a transaction handle), which keeps the use cases free of persistence types. Source: adversarial-architecture
+finding 2 (full review).
 
 ## Persistence
 
@@ -122,7 +150,16 @@ Accepted consequences:
   concurrent updates safe; it also blocks other writers to those rows meanwhile. Source: verify-findings-closed (push
   review).
 - **Reads do not wait for the lock.** A `GET` during an update returns the last committed balances (PostgreSQL READ
-  COMMITTED), never a half-updated state. Source: adversarial-code (push review).
+  COMMITTED), never a half-updated state. This is not covered by a test. Sources: adversarial-code (push review),
+  test-quality finding 3 (full review).
+
+### Lock waits are unbounded
+
+`SELECT … FOR UPDATE` waits as long as the lock is held, and there is no `lock_timeout`. If something holds the row
+locks for a long time, every balance update waits with a pool connection; ten of them use the whole Hikari pool, and
+then `GET` cannot get a connection either. Setting `lock_timeout` on the connections and the pool size explicitly
+would turn the wait into a fast failure. Not done: the only writer of these rows is the update itself, which holds
+the locks for milliseconds. Source: regression-hunt finding 3 (full review).
 
 ### Default database credentials in `Application.kt`
 
@@ -135,18 +172,34 @@ adversarial-code (push review).
 If Flyway fails, the application fails to start and the JVM exits, so the pool is not closed explicitly. Source:
 adversarial-code (push review).
 
+### Smaller accepted findings
+
+- Exposed registers the `Database` from `Database.connect` globally. The service has one database per JVM, so this
+  is harmless. Source: adversarial-code finding 2 (full review).
+- The demo seed uses fixed ids and 2026 dates; it lives in the test resources and is loaded only by `make run`.
+  Source: adversarial-code finding 4 (full review).
+- The read model hands the web adapter the mutable `TimeDeposit`; the adapter only reads it. Source: adversarial-code
+  finding 5 (full review).
+
 ## Testing
 
 - **Unit and integration tests, no mocks.** The domain has no dependencies to mock; the integration tests use the
   real database, because an in-memory substitute would not show PostgreSQL locking or types.
-- **Integration data sits on the paying side of each boundary** (31, 46 and 366 days). The boundaries themselves are
-  pinned in the unit tests; the integration tests check the wiring. Source: test-quality (push review).
+- **Integration data covers one side of each boundary** (31 and 46 days pay, 366 does not). The boundaries
+  themselves are pinned in the unit tests; the integration tests check the wiring. Source: test-quality (push review).
+- **Two lock tests.** One holds the row locks from a second connection and checks that an update waits and builds on
+  the change; it was verified both ways (with `.forUpdate()` removed it fails, 1000.83 instead of 2001.67). The other
+  runs two updates at once and expects both months; it catches an update whose read and write are split into two
+  transactions (test-quality mutant N03, full review). On correct code both always pass.
 - **Lock order is not tested.** That updates lock rows in id order (so two updates cannot deadlock) is held by the
-  code and a comment; a deadlock cannot be provoked reliably in a test. Source: test-quality (push review).
-- **The lock test waits for any blocked session** in `pg_stat_activity`. Only the test's own sessions run against the
-  test database, so this is the update. Its timeout path is not tested. Source: test-quality (push review).
-- **The lock test was verified both ways:** with `.forUpdate()` removed it fails (1000.83 instead of 2001.67), with
-  it restored it passes.
+  code and a comment; a deadlock cannot be provoked reliably in a test. Source: test-quality (push and full review).
+- **The lock test waits for any blocked session** in `pg_stat_activity`, without filtering by database or session.
+  The test container is used by one test at a time, so this is the update. Its timeout path is not tested. Sources:
+  test-quality (push review), regression-hunt finding 4 (full review).
+- **Not tested:** the Swagger UI route, an empty database, and student interest through the HTTP stack (it is
+  pinned in the unit tests). Sources: docs-claims-audit, test-quality (full review).
+- **Unreachable code:** `BigDecimalAsNumberSerializer.deserialize` exists because `KSerializer` requires it; the
+  service never reads JSON. Sources: adversarial-architecture, adversarial-code, test-quality (full review).
 - **`make run` uses Testcontainers** instead of a Docker Compose file: one less file to maintain, and the demo
   database is the same image the tests use.
 
@@ -157,7 +210,8 @@ adversarial-code (push review).
 The pre-push hook runs `make verify` and then the AI gate in push mode: read-only review agents on Sonnet, in
 parallel, stopped after three minutes. Running code to prove a finding (mutation testing, differential tests, hook
 experiments), the slow agents (regression, architecture, spec and docs review) and Opus are kept for
-`/quality-gate full`, run once before handover. The first version reviewed everything on every push and took over 15
+`/quality-gate full`, run once before handover (each agent on its own model: Opus, and Sonnet for the docs audit).
+The full review of this project took about 20 minutes. The first version reviewed everything on every push and took over 15
 minutes for a two-class change, mostly model time rather than build time. Sonnet on push is also cheaper for a
 review that runs many times a day; Opus is kept for the one thorough review. What was given up: findings at push
 time are marked SUSPECTED until `full` proves them or a human checks them.
