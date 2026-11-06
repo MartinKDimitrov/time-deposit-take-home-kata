@@ -12,9 +12,11 @@ setup:  ## Enable the git hooks and check Java and Docker
 
 test:   ## Compile and run unit tests, no Docker (one class: make test T=TimeDepositCalculatorTest)
 	./mvnw -q test $(if $(T),-Dtest=$(T))
+	@echo "OK: unit tests passed"
 
 verify: ## Unit + integration tests with Testcontainers (Docker required)
 	./mvnw -q verify
+	@echo "OK: unit and integration tests passed"
 
 run:    ## Start the app with demo data in a PostgreSQL container: http://localhost:8080/swagger (Docker required)
 	./mvnw -q test-compile exec:java -Dexec.mainClass=org.ikigaidigital.LocalApplicationKt -Dexec.classpathScope=test
