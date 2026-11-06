@@ -1,0 +1,14 @@
+#!/bin/sh
+# Full gate before code leaves the machine: unit + integration tests with Testcontainers (Docker must be running).
+# Skipped when the pushed commits touch no code or build file. Bypass once with: git push --no-verify
+zero=0000000000000000000000000000000000000000
+run=no
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue # branch deletion
+  if [ "$remote_sha" = "$zero" ] || ! git diff --quiet "$remote_sha" "$local_sha" -- src pom.xml .mvn Makefile 2>/dev/null; then
+    run=yes
+  fi
+done
+[ "$run" = "no" ] && exit 0
+echo "pre-push: make verify"
+make verify || { echo "pre-push: verification failed - push aborted"; exit 1; }
