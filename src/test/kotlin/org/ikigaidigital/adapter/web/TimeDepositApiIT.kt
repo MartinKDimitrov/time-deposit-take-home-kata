@@ -60,11 +60,20 @@ class TimeDepositApiIT {
 
         assertThat(response.status).isEqualTo(HttpStatusCode.NoContent)
         assertMatchesContract("/time-deposits/balance-updates", Request.Method.POST, response)
-        assertThat(balances()).containsExactlyEntriesOf(
-            mapOf(
-                1 to BigDecimal("1000.83"), // basic
-                2 to BigDecimal("1004.17"), // premium after 45 days
-                3 to BigDecimal("1000.00"), // student older than one year
+        // basic +0.83; premium pays after 45 days; student pays nothing after one year. Nothing else changes.
+        val timeDeposits = client.get("/time-deposits")
+        assertThat(Json.parseToJsonElement(timeDeposits.bodyAsText())).isEqualTo(
+            Json.parseToJsonElement(
+                """
+                [
+                  {"id": 1, "planType": "basic", "balance": 1000.83, "days": 31, "withdrawals": [
+                    {"id": 1, "amount": 100.00, "date": "2026-10-01"},
+                    {"id": 2, "amount": 50.50, "date": "2026-10-15"}
+                  ]},
+                  {"id": 2, "planType": "premium", "balance": 1004.17, "days": 46, "withdrawals": []},
+                  {"id": 3, "planType": "student", "balance": 1000.00, "days": 366, "withdrawals": []}
+                ]
+                """,
             ),
         )
     }
