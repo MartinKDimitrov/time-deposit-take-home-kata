@@ -30,6 +30,9 @@ All build and test commands go through `make`; agents use only these targets (`m
 
 ## Architecture (hexagonal, single module)
 
+This is the target structure; it is built slice by slice (see `git log`). Packages that do not exist yet follow
+these rules when they are added.
+
 ```
 org.ikigaidigital
   TimeDeposit, TimeDepositCalculator   shared domain classes (original package kept)
