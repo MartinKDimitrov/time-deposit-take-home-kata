@@ -1,34 +1,52 @@
-# Adversarial code review: domain refactoring (push mode)
+# adversarial-code (push mode, read only)
 
-Range: `c2dec64..a2f1fda`. Scope: `TimeDepositCalculator.kt`, `domain/interest/*Policy.kt`. Read-only; nothing was built or run.
+Range: 664cee8..0bce5c7. Production files only. Nothing was built or run, so every finding is SUSPECTED.
+Verdict: no blocking defect. One medium finding (lost update on concurrent balance updates), the rest are low or latent.
 
-## Verdict
+### 1. Medium — Concurrent POST /balance-updates can lose a month of interest (SUSPECTED)
+- **Where**: application/service/UpdateAllBalancesService.kt:15-19; adapter/persistence/ExposedTimeDepositRepository.kt:13-23
+- **Problem**: the transaction reads all rows, computes in memory and writes absolute balances. It takes no row lock. PostgreSQL defaults to READ COMMITTED, so two overlapping calls both read balance B and both write B+interest. Two calls then add one month of interest, not two. The use case is documented "Not idempotent", so a double click, a retry or two instances makes the result depend on timing.
+- **Why it matters**: silent wrong balances with no error. Not reachable in a single sequential client.
+- **Action**: SELECT ... FOR UPDATE in the update path (Exposed `forUpdate()` on a dedicated `findAllForUpdate`), or run the transaction at SERIALIZABLE with a retry. Full mode: IT firing two parallel POSTs and asserting the balance equals two months of interest.
 
-**PASS.** No user-reachable defect. The production diff is behaviour-neutral: three `class` -> `internal class`,
-`INTEREST_FREE_DAYS` public -> private, one local `val` extracted, one KDoc line.
+### 2. Low — Balance round trip through Double loses cents above about 9e13 (SUSPECTED)
+- **Where**: ExposedTimeDepositRepository.kt:29-33 (`toDouble()`), Tables.kt (`decimal(.., 19, 2)`), Money.kt:10
+- **Problem**: the schema allows 17 integer digits, Double holds about 15-17 significant digits. A balance such as 123456789012345.67 is read as Double, written back and changes in the last cent, even for a deposit that earns no interest. This follows from hard constraint 1/2 (Double), but nothing caps the column to the precision Double can hold.
+- **Why it matters**: only reachable with very large balances; GET and the update path then disagree with the stored value.
+- **Action**: record the limit in docs/TRADEOFFS.md or narrow the column to NUMERIC(15,2). Full mode: probe with 1e15 + 0.01.
 
-## Findings
+### 3. Low — Hard-coded default DB credentials and port (SUSPECTED)
+- **Where**: Application.kt:11-15, 17
+- **Problem**: if DB_PASSWORD is not set, the app silently connects as timedeposits/timedeposits. The port 8080 is fixed. `DatabaseConfig` is a data class, so a later `log(config)` prints the password in `toString()`.
+- **Why it matters**: a production misconfiguration is masked instead of failing fast. The password leak is latent.
+- **Action**: keep the defaults for `make run` only, or fail when DB_* is missing outside local runs. Override `toString` or use a non-data class if the config is ever logged.
 
-### 1. Low — SUSPECTED: duplicate plan types are silently dropped (documented, not guarded)
+### 4. Low — Dispatchers.IO is wider than the Hikari pool (SUSPECTED)
+- **Where**: adapter/web/TimeDepositRoutes.kt:21,25; adapter/persistence/DatabaseSetup.kt:17-23
+- **Problem**: IO allows 64 blocking threads, HikariCP defaults to 10 connections. Under more than 10 concurrent requests the extra threads wait up to 30 s for a connection, then fail with an unhandled exception (HTTP 500). Cancelling the request does not interrupt the blocked JDBC call.
+- **Why it matters**: load only; invisible in tests.
+- **Action**: set `maximumPoolSize` explicitly, or limit with `Dispatchers.IO.limitedParallelism(poolSize)`.
 
-- **Where:** `TimeDepositCalculator.kt:19` (`policies.associateBy { it.planType }`), KDoc line 15.
-- **Problem:** two injected policies with the same `planType` leave one of them dead with no error. The new KDoc states "last wins", but nothing enforces or tests it here.
-- **Why it matters:** latent only; `defaultPolicies()` has unique types, and the constructor is not reachable from HTTP. Bites when someone adds a plan and copies a `planType` string.
-- **Action:** in `full` mode check `TimeDepositCalculatorTest` for a test pinning "last wins". Otherwise leave as is (invalid-input handling is out of scope per the constraints).
+### 5. Low — Setup failure leaks the pool; Exposed Database is never disconnected (SUSPECTED)
+- **Where**: config/TimeDepositModule.kt:24-27; ExposedTransactionRunner.kt:10
+- **Problem**: `createDataSource` runs before `migrate`. If Flyway throws (bad migration, DB down), `ApplicationStopped` may never fire, so the pool stays open. `Database.connect` registers a global Exposed entry that nothing removes (`TransactionManager.closeAndUnregister`). Every `testApplication` in the IT suite adds one.
+- **Why it matters**: leaked connections and threads in test and failed-start scenarios; harmless in normal production.
+- **Action**: wrap migrate in try/close; unregister the database in the same stop hook.
 
-### 2. Low — SUSPECTED: public `InterestPolicy.monthlyInterest` skips the 30-day guard if called directly
+### 6. Latent — updateBalances silently ignores ids that no longer exist
+- **Where**: ExposedTimeDepositRepository.kt:15-21
+- **Problem**: `update` returns the affected row count and it is discarded. Today the transaction makes this unreachable; with a delete endpoint or a non-transactional caller a balance update would vanish without a trace.
+- **Action**: if rows are ever deletable, check the count. Otherwise leave as is.
 
-- **Where:** `InterestPolicy.kt:5-13` (KDoc only), `BasicInterestPolicy.kt` (no day check).
-- **Problem:** the interest-free period lives only in the calculator. `internal` on the three implementations now stops outside callers getting `BasicInterestPolicy`, but a custom or test policy can still be called directly. That is covered only by a KDoc sentence.
-- **Why it matters:** latent; there is no caller today. It bites if a future component (for example a projection endpoint) calls policies without the calculator.
-- **Action:** none now. If such a caller is added, move the guard behind one shared entry point.
+### 7. Latent — Two silent contracts without a compile-time link
+- **Where**: Tables.kt vs V1__create_time_deposit_tables.sql; TimeDepositResponses.kt vs openapi yaml
+- **Problem**: column names and scales (`decimal(19,2)`, `varchar(50)`) are spelled twice, in SQL and in Exposed, with no schema check. The DTO shape and the contract are held together only by the IT response validation. A rename in one place fails at runtime only.
+- **Action**: none now. If the schema grows, add an IT that reads every mapped column.
 
-## Checked and found sound
-
-- `deposit.balance += interest` is `set(get() + interest)`. `monthlyInterest` does not mutate the deposit, so extracting the `val` changes no order of evaluation.
-- Making `INTEREST_FREE_DAYS` private breaks nothing: the only reference in `src` is `TimeDepositCalculator.kt:31`.
-- `internal` policies are used from `defaultPolicies()` (public, return type `List<InterestPolicy>`, a public interface). That is legal and leaks no internal type. Tests in the same module still see them.
-- Boundaries: calculator `days <= 30` gives 0; premium `> 45`; student `<= 365`. These match the original (31, 46, and 365/366 as the first day without interest) and are unchanged by this diff.
-- Unknown or differently-cased `planType` earns 0, the same as the original.
-- Hard constraints 1 and 2 hold: `TimeDeposit` is untouched, and `updateBalance` keeps its signature, the `BigDecimal(Double)` + `HALF_UP` rounding and the `balance * rate / 12` order.
-- Last round's Medium (rounding mode and arithmetic order unprotected) was addressed by the test commit `7178178`. Not re-proven here; `verify-findings-closed` owns that.
+## Looked at and found sound
+- BigDecimalAsNumberSerializer: `toPlainString()` in an unquoted literal gives valid JSON numbers (no exponent, negatives are fine). The unused `deserialize` is harmless.
+- `Double.toMoney()` uses `BigDecimal.valueOf` (shortest decimal string), so there is no binary-expansion artefact. HALF_UP matches the calculator. NaN/Infinity cannot come from the database.
+- GET path: two queries in one transaction, `groupBy` plus `orEmpty()` gives deposits without withdrawals an empty list. Withdrawals are immutable, so READ COMMITTED skew between the two selects is harmless. Ordering by id is explicit.
+- Update path is atomic: one failing row rolls back all rows. The calculator mutates the list in place on purpose, and the repository persists those same objects.
+- SQL: FK and index present; `date` as a column name is legal in PostgreSQL and Exposed quotes it; `plan_type` varchar(50) matches the mapping.
+- Dependency direction: application has no adapter imports; the transaction boundary sits in the services, not the adapters.
