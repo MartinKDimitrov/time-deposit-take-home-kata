@@ -2,7 +2,7 @@ package org.ikigaidigital.domain.interest
 
 import org.ikigaidigital.TimeDeposit
 
-class StudentInterestPolicy : InterestPolicy {
+internal class StudentInterestPolicy : InterestPolicy {
     override val planType = "student"
 
     override fun monthlyInterest(deposit: TimeDeposit): Double =

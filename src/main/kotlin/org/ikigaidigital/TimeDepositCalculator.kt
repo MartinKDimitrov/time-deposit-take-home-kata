@@ -12,6 +12,7 @@ import java.math.RoundingMode
  *
  * The public API (no-arg constructor and `updateBalance(List<TimeDeposit>)`) is unchanged.
  * Plan specific rules live in [InterestPolicy] implementations, so a new plan is a new class.
+ * If several policies share a plan type, the last one in the list wins.
  */
 class TimeDepositCalculator(
     policies: List<InterestPolicy> = defaultPolicies(),
@@ -20,7 +21,9 @@ class TimeDepositCalculator(
 
     fun updateBalance(xs: List<TimeDeposit>) {
         xs.forEach { deposit ->
-            deposit.balance += roundToCents(monthlyInterest(deposit))
+            // Interest first, then the balance is read: the order of the original implementation.
+            val interest = roundToCents(monthlyInterest(deposit))
+            deposit.balance += interest
         }
     }
 
@@ -36,7 +39,7 @@ class TimeDepositCalculator(
 
     companion object {
         /** No plan earns interest during the first 30 days. */
-        const val INTEREST_FREE_DAYS = 30
+        private const val INTEREST_FREE_DAYS = 30
 
         fun defaultPolicies(): List<InterestPolicy> =
             listOf(BasicInterestPolicy(), StudentInterestPolicy(), PremiumInterestPolicy())
