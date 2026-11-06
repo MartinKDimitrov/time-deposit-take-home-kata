@@ -1,77 +1,79 @@
-# Verify findings closed - adversarial-architecture findings 1-3
+# Verify findings closed - fix commits 6951c57 and 7178178
 
-Range: `61783bc..c2dec64`. Fix commit: `c2dec64`. Findings source: `.git/ai-reviews-previous/adversarial-architecture.md`.
+Range `c2dec64..a2f1fda`. Mode: push (reading only, nothing was built or run). Every verdict below is from reading the
+diff and the findings, so each is SUSPECTED until `/quality-gate full` runs `make test` and the mutations.
+Findings sources: `docs/ai-reviews/{adversarial-architecture,adversarial-code,test-quality}.md` and the previous
+`verify-findings-closed.md` (items 3b, 2b).
 
-## Verdict
+## Not closed (PARTIAL / STILL OPEN)
 
-**The commit message's claim "Addresses adversarial-architecture findings 1-3" does not fully hold.** Finding 1 is
-closed. Finding 2 is closed as a documentation gap, but its trigger input behaves exactly as before. Finding 3 is half
-done: the duplicate `planType` collision was not touched, in code, in docs or in tests.
+| Item                | Description                                                            | Status     |
+| ------------------- | ---------------------------------------------------------------------- | ---------- |
+| arch 9              | Duplicate plan type silent; injection drops defaults; CLAUDE.md silent | PARTIAL    |
+| arch 10             | Layering unenforced; public `INTEREST_FREE_DAYS`                       | PARTIAL    |
+| arch 6              | Public policies; mutable deposit passed in                             | PARTIAL    |
+| test-quality 4      | "Round the interest, not the sum" invariant has no explicit row        | STILL OPEN |
+| test-quality 6      | Duplicate `planType` untested                                          | STILL OPEN |
+| test-quality 8      | No degenerate inputs (empty list, zero, negative, days 0)              | STILL OPEN |
+| test-quality 5      | Plan-type matching: only `Basic` added                                 | PARTIAL    |
+| test-quality 7      | `premium, 30` row missing; duplicate rows kept                         | PARTIAL    |
+| test-quality 9      | Injected stub still returns constant `10.0`                            | PARTIAL    |
 
-`c2dec64` changes comments and `CLAUDE.md` only, so no behaviour changed and nothing was enforced or tested by it.
+### arch 9 - PARTIAL
+- **Done**: `TimeDepositCalculator.kt:15` KDoc says "the last policy for a plan type wins". Rejecting duplicates was not
+  done; that is acceptable under hard constraint 5 if recorded.
+- **Not done**: `CLAUDE.md:53-54` is unchanged. It still does not say that injection replaces the defaults (so it must
+  include `defaultPolicies()`), and the `defaultPolicies()` exception to "wiring in `config/` only" (line 49) is not noted.
+  `TimeDepositCalculator(listOf(vip))` still leaves `basic` at 1000.0 with no signal.
+- **Overclaim**: commit 6951c57 says "the duplicate plan type rule is documented"; true for the KDoc only.
+- **Not pinned**: no test injects a `basic` duplicate, so first-wins would stay green (same as the previous round, item 3b).
 
-| Item | Description                                          | Status     |
-| ---- | ---------------------------------------------------- | ---------- |
-| 3    | Registration claim and its caveats (rollup)          | PARTIAL    |
-| 3b   | Duplicate `planType` collides silently, undocumented | STILL OPEN |
-| 3a   | Claim omitted constructor injection                  | CLOSED     |
-| 2    | 30-day floor split from the policies (rollup)        | PARTIAL    |
-| 2b   | Direct policy call pays interest on day 1            | STILL OPEN |
-| 2a   | Interface docstring silent on who owns the floor     | CLOSED     |
-| 1    | `TimeDeposit` is a domain type in the root package   | CLOSED     |
+### arch 10 - PARTIAL
+- `INTEREST_FREE_DAYS` is now `private` (`TimeDepositCalculator.kt:42`); read-confirmed, nothing else referenced it.
+- The layering test was not added. The finding tied it to the first adapter landing; record that deferral.
 
-The finding 2 rollup is a judgement call. The finding complained about the missing statement and did not ask for
-enforcement, so if a doc-only resolution is accepted, finding 2 is closed. The hazard itself is unchanged.
+### arch 6 - PARTIAL
+- The three policies are `internal` (the finding's first action). Nothing outside `domain/interest` and the calculator
+  uses them, and `defaultPolicies()` returns `InterestPolicy`, so it still compiles by reading.
+  Effect: previous item 2b is closed from outside the module, still callable inside it.
+- Unchanged: policies still receive the mutable `TimeDeposit`; reading one plan still takes two files.
 
-## Open and partial items
+### test-quality 4 - STILL OPEN
+- The 6.00 row remains the only guard for "round the addend", and its comment was reworded to "smallest balance that
+  earns a cent", which hides that role. The suggested `basic, 1000.004, 31` row was not added.
+- The commit message says "all seven surviving mutants are caught". The round-the-sum mutant is not shown to be
+  caught by any new row (for example 150.00 + 0.125 gives 150.125, which HALF_UP rounds to 150.13 either way).
+  Check in `full`: apply `balance = roundToCents(balance + interest)` and run `make test T=TimeDepositCalculatorTest`.
 
-### 1. Low — Finding 3b: duplicate planType still collides silently and is still undocumented
+### test-quality 5 / 7 / 9 - PARTIAL
+- 5: `Basic` added; empty string and padded `" basic "` not.
+- 7: day-30 injected-plan test added; `premium, 1000.00, 30, 1000.00` not added; rows 1 and 4 (same branch) kept.
+- 9: day-30 case added; the stub still returns `10.0`, so rounding of an injected plan is untested.
 
-- **Where**: `src/main/kotlin/org/ikigaidigital/TimeDepositCalculator.kt:19`; `CLAUDE.md:53-55` is silent on it.
-- **Problem**: Balance 1000.0, 31 days, plan `basic`, through `updateBalance`. `defaultPolicies() + dupBasic(10.0)` gives 1010.0; `listOf(dupBasic(10.0)) + defaultPolicies()` gives 1000.83, the injected policy ignored with no error; `listOf(vip(10.0), vip(20.0))` gives 1020.0 on plan `vip`. A search of `CLAUDE.md`, `src` and `docs/ASSIGNMENT.md` finds no mention of the behaviour.
-- **Why it matters**: The finding called this "an undocumented edge"; it remains one. The new `CLAUDE.md` text recommends constructor injection, the only path where a collision can occur, and list order silently decides the rate. Mutating `associateBy` to first-wins still passes all 14 tests, so nothing pins it. The default no-arg path is unaffected: its three plan types are distinct.
-- **Action**: Add one sentence to `CLAUDE.md:53-55` or the `TimeDepositCalculator` KDoc: the last policy for a `planType` wins, silently. Hard constraint 5 means a rejecting guard should not be added unasked.
+## Closed
 
-### 2. Low — Finding 2b: direct policy call still pays inside the interest-free period
+| Item                | Description                                                        | Status |
+| ------------------- | ------------------------------------------------------------------ | ------ |
+| adversarial-code 1  | Rounding mode, `BigDecimal(Double)`, arithmetic order unpinned     | CLOSED |
+| adversarial-code 2  | Balance read before the policy call (order changed by refactor)    | CLOSED |
+| test-quality 1-3    | HALF_UP tie, `BigDecimal.valueOf`, `balance * rate / 12` order     | CLOSED |
+| verify item 2b      | Direct policy call pays inside the interest-free period           | CLOSED |
+| verify item 3       | Day-30 floor not tested for injected plans                         | CLOSED |
 
-- **Where**: `src/main/kotlin/org/ikigaidigital/domain/interest/BasicInterestPolicy.kt:8-9`, `StudentInterestPolicy.kt:8-9`, `InterestPolicy.kt:8-10`.
-- **Problem**: `BasicInterestPolicy().monthlyInterest(TimeDeposit(1, "basic", 1000.0, 1))` returns 0.8333333333333334, the same as before the fix. `StudentInterestPolicy` returns 2.5 for the same case; the finding named only Basic. `PremiumInterestPolicy` returns 0.0 because of its own 45-day rule.
-- **Why it matters**: The fix is a disclaimer ("not meant to be called directly"); the classes stay public and nothing enforces it. Exposure is limited: `TimeDepositCalculator` is the only production caller and it applies the floor correctly.
-- **Action**: Accept this as the documented design and record that decision, or restrict visibility in a separate change. Do not describe it as fixed in code.
+- adversarial-code 1: the four rows added (`150.13`, `18.01`, `10.02`, `3.62`) are exactly the rows that report proved
+  kill the five survivors; the wrong comment is replaced. Not run here.
+- adversarial-code 2: `TimeDepositCalculator.kt:24-25` computes `interest` first, then adds. No test pins the order
+  (a policy that writes the balance); a revert would stay green.
+- test-quality 1-3: covered by the same rows (the `basic 18.00` row stands in for `student 402.00`).
+- verify item 3: the `vip` day-30 test is real and goes through `updateBalance` with the injected policy.
+
+## Happy path and over-correction (by reading)
+- No-arg constructor, `defaultPolicies()` and `updateBalance` signature are unchanged; hard constraint 2 holds
+  (the interest/balance split keeps the original evaluation order).
+- `internal` on the policies does not affect the public API; the test source set sees `InterestPolicy` (still public).
 
 ## New defects found while checking
+- None beyond the above. Pre-existing: the test file has no newline at end of file.
 
-### 3. Low — The new "applies to every plan" rule is not tested for injected plans
-
-- **Where**: `CLAUDE.md:53-55`; `src/test/kotlin/org/ikigaidigital/TimeDepositCalculatorTest.kt:57-69`.
-- **Problem**: The injected-plan test uses only day 31. Mutation: remove the calculator guard and put a `days > 30` check in Basic and Student instead. All 14 tests pass, yet injected plans would lose the floor.
-- **Why it matters**: The current code is correct: an injected policy gives 1000.0 at days 1 and 30, was asked 0 times, and gives 1010.0 at day 31. But the rule `c2dec64` documents can regress with a green build, on the injection path it recommends. Deleting the guard outright is caught (2 failures).
-- **Action**: Add a day-30 assertion for an injected plan to the existing test.
-
-### 4. Low — CLAUDE.md overstates what hard constraint 2 pins
-
-- **Where**: `CLAUDE.md:51`, against `CLAUDE.md:22-25` and `docs/ASSIGNMENT.md:42,56`.
-- **Problem**: Line 51 says both classes are "pinned to the root package by hard constraints 1 and 2". Only constraint 1 names a package, and only for `TimeDeposit`. Constraint 2 covers signature, behaviour and the no-arg constructor. The assignment pins no package for the calculator.
-- **Why it matters**: The new sentence cites a rule that does not say this. The error came from the original finding's wording and was carried into the project rules, which later reviews treat as authoritative.
-- **Action**: Add the package to constraint 2, or reword line 51 to say the calculator stays there by choice.
-
-## Closed items
-
-- **Finding 1**: `CLAUDE.md:51-52` carries the sentence the finding asked for and extends it to `TimeDepositCalculator`, apart from the citation in item 4. The import graph is unchanged and acyclic, with no framework imports under `domain/`. The upward package edge remains, as the finding accepted.
-- **Finding 2a**: `InterestPolicy.kt:8-10` and `CLAUDE.md:54-55` now say the calculator owns the floor. Verified through `updateBalance`: basic, student, premium and an injected plan all give 1000.0 at days 1 and 30, and the policy is not called.
-- **Finding 3a**: `CLAUDE.md:53-54` names both routes, `defaultPolicies()` and constructor injection.
-
-## Valid-case and regression checks
-
-- **Happy path**: no-arg constructor, premium, 1000.0, day 46 gives 1004.17.
-- **Valid injection**: `defaultPolicies() + vip(10.0)` gives 1010.0 on `vip` and leaves `basic` at 1000.83.
-- **Hard constraint 2**: 200,000 randomised cases, including boundary days, negative balances and unknown plans, are bit-identical to the original calculator from `61783bc`.
-- **Over-correction**: none possible, since `c2dec64` adds no guard.
-
-## Checks run
-
-- `make test` at `c2dec64` in a private worktree: passed, 14 tests, 0 failures, confirmed from the Surefire report.
-- Reproductions: a scratch `AuditReproTest`, 5 tests passed, run through `make test T=AuditReproTest`.
-- Mutations, each against `TimeDepositCalculatorTest`: guard deleted (2 failures); guard moved into Basic and Student (passed); first-wins (passed); `require` on duplicates (passed).
-- `make verify` was **not run**: Docker is unavailable and the task excluded it. The range contains no `*IT` tests.
-- The worktree was removed. Only this report was written to the main checkout.
+## Not done
+- `make test` and the mutations were not run (push mode). Prove in `/quality-gate full`.
