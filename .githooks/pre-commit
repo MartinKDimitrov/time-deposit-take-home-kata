@@ -1,6 +1,7 @@
 #!/bin/sh
 # Fast gate on every commit: compile + unit tests (no Docker, seconds).
-# Skipped when no code or build file is staged. Bypass once with: git commit --no-verify
-git diff --cached --quiet -- src pom.xml .mvn Makefile && exit 0
+# Skipped when no path listed in .githooks/code-paths is staged. Bypass once with: git commit --no-verify
+code_paths=$(grep -v '^#' .githooks/code-paths)
+git diff --cached --quiet -- $code_paths && exit 0
 echo "pre-commit: make test"
 make test || { echo "pre-commit: unit tests failed - commit aborted"; exit 1; }

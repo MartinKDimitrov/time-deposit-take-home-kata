@@ -1,12 +1,13 @@
 #!/bin/sh
 # Runs when the pushed commits touch code or build files:
 #   1. make verify - unit + integration tests with Testcontainers (Docker must be running)
-#   2. AI quality gate - review agents chosen by what the pushed commits changed (Claude Code, headless)
+#   2. AI quality gate - review agents chosen by what the pushed commits changed (Claude Code, headless,
+#      push budget: quick agents only, stopped after AI_GATE_TIMEOUT seconds, default 180)
 # After an AI review that wrote reports the push stops: review them, commit them, push again.
 # Bypass: SKIP_AI_GATE=1 git push (skips only the AI review) | git push --no-verify (skips everything)
 
 zero=0000000000000000000000000000000000000000
-code_paths="src pom.xml .mvn Makefile"
+code_paths=$(grep -v '^#' .githooks/code-paths)
 
 base=""
 tip=""
@@ -66,8 +67,33 @@ command -v claude >/dev/null 2>&1 ||
 curl -s -m 5 -o /dev/null https://api.anthropic.com 2>/dev/null ||
   continue_without_ai "No connection to Claude (api.anthropic.com is unreachable)."
 
-echo "pre-push: AI review of $review_base..$tip - this takes a few minutes"
-claude -p "/quality-gate auto $review_base..$tip" --permission-mode auto ||
+timeout=${AI_GATE_TIMEOUT:-180}
+log=$(mktemp "${TMPDIR:-/tmp}/ai-gate.XXXXXX")
+trap 'rm -f "$log" "$log.rc"' EXIT
+echo "pre-push: AI review of $review_base..$tip - a few minutes, stopped after ${timeout}s"
+# Portable timeout (macOS has no timeout command): run the command in its own process group and, on the time
+# limit or Ctrl+C, stop the whole group, so no build started by an agent is left running. Exit code 142 = timeout.
+# The exit code goes through a file because a pipeline returns the status of tee.
+run_with_timeout() {
+  perl -e '
+    my $limit = shift;
+    my $pid = fork;
+    if ($pid == 0) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    my $stop = sub { kill "TERM", -$pid; sleep 2; kill "KILL", -$pid; exit $_[0] };
+    $SIG{ALRM} = sub { $stop->(142) };
+    $SIG{INT} = $SIG{TERM} = sub { $stop->(130) };
+    alarm $limit;
+    waitpid $pid, 0;
+    exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+  ' "$@"
+}
+{
+  run_with_timeout "$timeout" claude -p "/quality-gate auto $review_base..$tip" --model sonnet --permission-mode auto
+  echo $? >"$log.rc"
+} | tee "$log"
+[ "$(cat "$log.rc")" = "142" ] &&
+  continue_without_ai "The AI review was stopped after ${timeout}s (raise it with AI_GATE_TIMEOUT=<seconds>)."
+grep -q '^QUALITY-GATE: DONE' "$log" ||
   continue_without_ai "The AI review did not complete (see the messages above)."
 
 echo "$tip" >"$state"

@@ -78,12 +78,15 @@ org.ikigaidigital
   | Moment | Automatic (git hook) | AI, triggered by the human |
   | --- | --- | --- |
   | `git commit` | `pre-commit`: `make test`; skipped when no code or build file is staged | `/review-step` on the change being committed |
-  | `git push` | `pre-push`: `make verify`, then the AI gate (`claude -p "/quality-gate auto <range>"`); skipped when the pushed commits touch no code or build file | review the reports, fix or record the findings, commit the reports, push again |
-  | handover / release | – | `/quality-gate full` on the whole range |
+  | `git push` | `pre-push`: `make verify`, then the AI gate in push mode (`claude -p "/quality-gate auto <range>"`): quick read-only agents on Sonnet, stopped after 3 minutes; skipped when the pushed commits touch no path in `.githooks/code-paths` | review the reports, fix or record the findings, commit the reports, push again |
+  | handover / release | – | `/quality-gate full <base-ref>`: every agent, no time limit, run once on purpose |
 
 - Push when a slice is complete and green, not after every commit: the push is where the expensive checks run.
 - When the AI gate writes reports the push stops. Commit the reports (and any `fix:` commits) and push again;
   only changes not yet reviewed are reviewed again. Review agent reports are committed with the slice.
+  The stop is a reminder, not a block: the second push goes through even if a finding is left open.
+- Push mode reviews by reading only and defers the slow agents (regression, architecture, spec and docs review)
+  and every proof by running code to `/quality-gate full`.
 - Without Claude Code or a connection, the hook says what will not run and asks whether to continue.
   `SKIP_AI_GATE=1 git push` skips only the AI review; `git push --no-verify` skips every check.
 - When something is ambiguous, pick the most reasonable reading, implement it, and record it in

@@ -65,14 +65,23 @@ Label each **CONFIRMED** (you reproduced it) or **PLAUSIBLE** (reasoned, not run
 - **Read-only on the main checkout.** Never edit files and never run `git checkout`, `stash`, `reset`, `commit`
   or anything else that changes the working tree, the index or refs. The only path you may write to is
   `docs/ai-reviews/`.
+- **Budget.** The prompt names the mode; without one, use `push`. The budget overrides any method described above.
+  - `push` – the automatic gate on every `git push`; it must finish within three minutes. Review by reading only:
+    the hook has just run the full verification, so the build is green. Do not build, run tests, mutate code or
+    create a worktree. Read the diff and only the files it touches; stop after about 10 tool calls. Mark each
+    finding SUSPECTED and name the check that `full` mode should run to prove it.
+  - `full` – the thorough review before handover or release, started on purpose. No call limit; prove findings by
+    running code where that helps. Run the full verification command at most once.
 - **Isolate anything that builds, runs tests or mutates code.** Create a private copy and work only there:
   `git worktree add --detach "${TMPDIR:-/tmp}/<agent-name>-$$" HEAD`; remove it with
-  `git worktree remove --force <path>` when done. Never run two builds at the same time.
+  `git worktree remove --force <path>` when done. Other agents may build in their own worktrees at the same time:
+  never wait for other builds. When the build tool caches dependencies in a shared place, run it offline
+  (Maven: prefix the command with `MAVEN_ARGS=-o`).
 - **Scope before reading.** Review only the range or files you were given. If none were given, review the commits
   not yet pushed (`@{upstream}..HEAD`), or `$(git merge-base HEAD origin/HEAD)..HEAD` when there is no upstream.
   Open other files only when a finding needs them.
-- **Cheapest check first.** Use the project's fast, targeted test command (see `CLAUDE.md`) for the affected area.
-  Run the full verification command at most once per review. Never clean build output or caches of the main checkout.
+- **Cheapest check first.** Prefer reading over running, and a targeted test over a full build. Never clean build
+  output or caches of the main checkout.
 - **No long-running processes.** Never start the application or anything that binds a port; stop every process you start.
 - **Bounded output.** At most 10 findings, most severe first. Each finding is a heading `### <n>. <Severity> — <one-line title>` followed by at most four bullets: **Where** (`file:line`), **Problem**, **Why it matters**, **Action**. No narrative paragraphs.
   Write the full report to `docs/ai-reviews/<agent-name>.md` and return a summary of at most 5 lines.

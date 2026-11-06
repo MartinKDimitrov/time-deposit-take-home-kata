@@ -1,0 +1,2 @@
+# Paths whose changes trigger the hooks: code, build files and the quality gate itself. Read by pre-commit and pre-push.
+src pom.xml .mvn mvnw mvnw.cmd Makefile .githooks .claude
