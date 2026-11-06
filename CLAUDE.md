@@ -48,7 +48,11 @@ org.ikigaidigital
   decided in the web adapter.
 - Exposed tables and DTOs never leave their adapter; map at the boundary. Wiring is manual, in `config/` only.
 - Money outside the domain is `BigDecimal` with scale 2; convert with `Double.toMoney()` only.
-- A new interest plan = a new `InterestPolicy` implementation registered in `defaultPolicies()`.
+- `TimeDeposit` and `TimeDepositCalculator` are domain types pinned to the root package by hard constraints 1 and 2;
+  treat them as domain, not as the composition level.
+- A new interest plan = a new `InterestPolicy` implementation, added to `defaultPolicies()` or injected through the
+  `TimeDepositCalculator` constructor. Policies hold plan-specific rules only; the 30-day interest-free period applies
+  to every plan and is enforced by the calculator.
 
 ## Code style
 

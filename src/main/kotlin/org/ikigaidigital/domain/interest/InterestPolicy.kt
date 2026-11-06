@@ -2,7 +2,13 @@ package org.ikigaidigital.domain.interest
 
 import org.ikigaidigital.TimeDeposit
 
-/** Monthly interest rule for one plan type. */
+/**
+ * Monthly interest rule for one plan type.
+ *
+ * Only plan-specific rules belong here. The interest-free first 30 days apply to every plan and are
+ * enforced by [org.ikigaidigital.TimeDepositCalculator] before a policy is asked, so policies are not
+ * meant to be called directly.
+ */
 interface InterestPolicy {
     val planType: String
 
