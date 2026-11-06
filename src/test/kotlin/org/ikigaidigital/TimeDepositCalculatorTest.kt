@@ -4,6 +4,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
+import org.ikigaidigital.domain.interest.InterestPolicy
 
 class TimeDepositCalculatorTest {
 
@@ -51,5 +52,19 @@ class TimeDepositCalculatorTest {
             TimeDeposit(1, "basic", 1000.83, 31),
             TimeDeposit(2, "premium", 1004.17, 46),
         )
+    }
+
+    @Test
+    fun `new plan types are supported by adding an interest policy`() {
+        val vipPolicy = object : InterestPolicy {
+            override val planType = "vip"
+            override fun monthlyInterest(deposit: TimeDeposit) = 10.0
+        }
+        val calculator = TimeDepositCalculator(TimeDepositCalculator.defaultPolicies() + vipPolicy)
+        val deposit = TimeDeposit(1, "vip", 1000.0, 31)
+
+        calculator.updateBalance(listOf(deposit))
+
+        assertThat(deposit.balance).isEqualTo(1010.0)
     }
 }
