@@ -1,79 +1,46 @@
-# Verify findings closed - fix commits 6951c57 and 7178178
+# Verify findings closed - fix commits 9df7b3f and 77db64b
 
-Range `c2dec64..a2f1fda`. Mode: push (reading only, nothing was built or run). Every verdict below is from reading the
-diff and the findings, so each is SUSPECTED until `/quality-gate full` runs `make test` and the mutations.
-Findings sources: `docs/ai-reviews/{adversarial-architecture,adversarial-code,test-quality}.md` and the previous
-`verify-findings-closed.md` (items 3b, 2b).
+Range `0bce5c7..33f165a`. Mode: push (reading only, nothing built or run, no Docker). Every verdict is SUSPECTED until
+`/quality-gate full` runs the checks named below. Findings source: `docs/ai-reviews/adversarial-code.md` (item 1) and
+`docs/ai-reviews/test-quality.md` (item 1). This file replaces the report of the previous round (see git history).
 
-## Not closed (PARTIAL / STILL OPEN)
+## Not closed
 
-| Item                | Description                                                            | Status     |
-| ------------------- | ---------------------------------------------------------------------- | ---------- |
-| arch 9              | Duplicate plan type silent; injection drops defaults; CLAUDE.md silent | PARTIAL    |
-| arch 10             | Layering unenforced; public `INTEREST_FREE_DAYS`                       | PARTIAL    |
-| arch 6              | Public policies; mutable deposit passed in                             | PARTIAL    |
-| test-quality 4      | "Round the interest, not the sum" invariant has no explicit row        | STILL OPEN |
-| test-quality 6      | Duplicate `planType` untested                                          | STILL OPEN |
-| test-quality 8      | No degenerate inputs (empty list, zero, negative, days 0)              | STILL OPEN |
-| test-quality 5      | Plan-type matching: only `Basic` added                                 | PARTIAL    |
-| test-quality 7      | `premium, 30` row missing; duplicate rows kept                         | PARTIAL    |
-| test-quality 9      | Injected stub still returns constant `10.0`                            | PARTIAL    |
+| Item | Description | Status |
+| ---- | ----------- | ------ |
+| adversarial-code 1 (test side) | The new concurrency IT may pass without the lock | PARTIAL (SUSPECTED) |
 
-### arch 9 - PARTIAL
-- **Done**: `TimeDepositCalculator.kt:15` KDoc says "the last policy for a plan type wins". Rejecting duplicates was not
-  done; that is acceptable under hard constraint 5 if recorded.
-- **Not done**: `CLAUDE.md:53-54` is unchanged. It still does not say that injection replaces the defaults (so it must
-  include `defaultPolicies()`), and the `defaultPolicies()` exception to "wiring in `config/` only" (line 49) is not noted.
-  `TimeDepositCalculator(listOf(vip))` still leaves `basic` at 1000.0 with no signal.
-- **Overclaim**: commit 6951c57 says "the duplicate plan type rule is documented"; true for the KDoc only.
-- **Not pinned**: no test injects a `basic` duplicate, so first-wins would stay green (same as the previous round, item 3b).
-
-### arch 10 - PARTIAL
-- `INTEREST_FREE_DAYS` is now `private` (`TimeDepositCalculator.kt:42`); read-confirmed, nothing else referenced it.
-- The layering test was not added. The finding tied it to the first adapter landing; record that deferral.
-
-### arch 6 - PARTIAL
-- The three policies are `internal` (the finding's first action). Nothing outside `domain/interest` and the calculator
-  uses them, and `defaultPolicies()` returns `InterestPolicy`, so it still compiles by reading.
-  Effect: previous item 2b is closed from outside the module, still callable inside it.
-- Unchanged: policies still receive the mutable `TimeDeposit`; reading one plan still takes two files.
-
-### test-quality 4 - STILL OPEN
-- The 6.00 row remains the only guard for "round the addend", and its comment was reworded to "smallest balance that
-  earns a cent", which hides that role. The suggested `basic, 1000.004, 31` row was not added.
-- The commit message says "all seven surviving mutants are caught". The round-the-sum mutant is not shown to be
-  caught by any new row (for example 150.00 + 0.125 gives 150.125, which HALF_UP rounds to 150.13 either way).
-  Check in `full`: apply `balance = roundToCents(balance + interest)` and run `make test T=TimeDepositCalculatorTest`.
-
-### test-quality 5 / 7 / 9 - PARTIAL
-- 5: `Basic` added; empty string and padded `" basic "` not.
-- 7: day-30 injected-plan test added; `premium, 1000.00, 30, 1000.00` not added; rows 1 and 4 (same branch) kept.
-- 9: day-30 case added; the stub still returns `10.0`, so rounding of an injected plan is untested.
+### adversarial-code 1 - production fix CLOSED, proof PARTIAL
+- **Fix read**: `UpdateAllBalancesService.kt:15` now calls `findAllForUpdate()`; the adapter does `selectAll().orderBy(id).forUpdate()`
+  inside the same transaction. In PostgreSQL READ COMMITTED the second transaction waits on the row lock and then re-reads the
+  committed row, so it sees the first update's balance. Ordering by id gives one lock order. Reachable through the real entry
+  point (the route calls the service). GET still uses the unlocked `findAll()`, correct.
+- **Weak proof**: `TimeDepositApiIT.kt:88-95` fires two POSTs with `launch` and asserts 1001.66. The race window without the
+  lock is a few milliseconds and the test does not force the overlap, so it may be green on the broken code (the test is
+  not shown to fail first).
+- **Full-mode check**: in a scratch copy, switch the service back to `findAll()` and run the concurrent test about 20 times
+  (`make verify`); if it passes even once, make the overlap deterministic (for example a 3-5 request fan-out, or hold the
+  first transaction open with `pg_sleep` in a test-only hook).
 
 ## Closed
 
-| Item                | Description                                                        | Status |
-| ------------------- | ------------------------------------------------------------------ | ------ |
-| adversarial-code 1  | Rounding mode, `BigDecimal(Double)`, arithmetic order unpinned     | CLOSED |
-| adversarial-code 2  | Balance read before the policy call (order changed by refactor)    | CLOSED |
-| test-quality 1-3    | HALF_UP tie, `BigDecimal.valueOf`, `balance * rate / 12` order     | CLOSED |
-| verify item 2b      | Direct policy call pays inside the interest-free period           | CLOSED |
-| verify item 3       | Day-30 floor not tested for injected plans                         | CLOSED |
+| Item | Description | Status |
+| ---- | ----------- | ------ |
+| adversarial-code 1 | Lost update on concurrent POST: `FOR UPDATE` in id order | CLOSED (code), see above for the test |
+| test-quality 1 | POST did not check withdrawals, `days`, `plan_type` | CLOSED |
 
-- adversarial-code 1: the four rows added (`150.13`, `18.01`, `10.02`, `3.62`) are exactly the rows that report proved
-  kill the five survivors; the wrong comment is replaced. Not run here.
-- adversarial-code 2: `TimeDepositCalculator.kt:24-25` computes `interest` first, then adds. No test pins the order
-  (a policy that writes the balance); a revert would stay green.
-- test-quality 1-3: covered by the same rows (the `basic 18.00` row stands in for `student 402.00`).
-- verify item 3: the `vip` day-30 test is real and goes through `updateBalance` with the injected policy.
+- **test-quality 1**: the POST test now reads back through `GET /time-deposits` and compares the full JSON (ids, plan types,
+  days, withdrawals, scale-2 balances). Expected values are hand-derived (1000.83, 1004.17, 1000.00; days 31/46/366 unchanged;
+  both withdrawals present), so the assertion would catch a repository that drops withdrawals or alters `days`. The
+  direct-SQL `balances()` helper is still used by the idempotency test. Valid-path check: the clean seed -> POST -> GET path is
+  the same one the test exercises, so the happy path is still reachable.
+- **Over-correction**: `forUpdate()` on a plain `SELECT ... ORDER BY` has no join or aggregate, so PostgreSQL accepts it. An
+  empty table returns an empty list and the update is a no-op. Not exercised (no empty-table IT, test-quality 3 stays open
+  from the previous round).
 
-## Happy path and over-correction (by reading)
-- No-arg constructor, `defaultPolicies()` and `updateBalance` signature are unchanged; hard constraint 2 holds
-  (the interest/balance split keeps the original evaluation order).
-- `internal` on the policies does not affect the public API; the test source set sees `InterestPolicy` (still public).
-
-## New defects found while checking
-- None beyond the above. Pre-existing: the test file has no newline at end of file.
-
-## Not done
-- `make test` and the mutations were not run (push mode). Prove in `/quality-gate full`.
+## Other items seen while checking (not part of the list)
+- Compilation of `.forUpdate()` has no import in `ExposedTimeDepositRepository.kt`; it must be a `Query` member in Exposed 1.x.
+  The pre-push `make verify` is said to be green, so I did not rebuild; confirm that `make verify` passed on 9df7b3f.
+- `TimeDepositApiIT.kt:22-23` the `kotlinx.coroutines` imports sit after `java.*`; harmless, no formatter in `check` complains today.
+- Open from the review, unchanged: adversarial-code 2-7 (Double precision cap, default credentials, pool size vs `Dispatchers.IO`,
+  pool leak on failed start, ignored update count); test-quality 2-6.
