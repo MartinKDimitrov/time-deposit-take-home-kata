@@ -91,3 +91,7 @@ The assignment leaves these points open. Each choice is the simplest reading tha
 As the assignment allows, the service does not validate input or handle errors beyond what the frameworks do. There
 is no authentication, paging, or endpoint to create deposits or withdrawals: data is inserted into the database
 directly. `make run` loads demo data from the test resources, and the integration tests insert their own.
+
+What a caller sees in the cases the assignment leaves open: an empty database gives `[]` from `GET` and `204` from
+`POST` (nothing to update). A database failure surfaces as the framework's `500`; the contract defines no error
+schema, because error handling is out of scope.

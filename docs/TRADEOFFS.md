@@ -31,6 +31,18 @@ indirection for a graph this small. If the graph grows, Koin is the natural next
 The assignment ships a Maven project; changing the build tool would be a large change that solves nothing in the
 assignment. Gradle with the Kotlin DSL would be the idiomatic choice for a new Kotlin service.
 
+### Kotlin only
+
+The original repository held the kata in several languages. Only the Kotlin project was kept, at the repository
+root, so the build, the hooks and the documentation describe one project (commit `4ca5339`). Source: spec-vs-plan
+finding 9 (full review).
+
+### Concurrency safety goes beyond the assignment
+
+The assignment does not mention concurrent requests. The row locking and its two tests were added because a review
+showed that two overlapping updates lose a month of interest, which is a correctness bug for a bank. They are the
+most expensive part of the test suite. Source: spec-vs-plan finding 9 (full review).
+
 ### Single module
 
 Hexagonal layers are packages in one module. Separate modules would let the compiler enforce the dependency
@@ -181,6 +193,23 @@ adversarial-code (push review).
 - The read model hands the web adapter the mutable `TimeDeposit`; the adapter only reads it. Source: adversarial-code
   finding 5 (full review).
 
+### Decided in passing
+
+- `GET` returns the deposits **ordered by id**, and the contract promises it; the assignment asks for no order.
+- **Ids are not generated**: the tables use plain `INTEGER` primary keys, as the assignment specifies, so whoever
+  inserts rows chooses the ids.
+- `plan_type` is `VARCHAR(50)`: the assignment says "String"; 50 is a generous bound for a plan name.
+- **Two `Double`-to-decimal conversions**: the calculator uses `BigDecimal(Double)` to reproduce the original
+  rounding; `toMoney()` uses `BigDecimal.valueOf` for an already-rounded balance. They agree for every cent value.
+- **The composition root migrates the schema on start**, so every application start (including each integration
+  test) runs Flyway first, and tests insert their data after `startApplication()`.
+- **`findAllForUpdate` names locking in an application port.** The use case needs the guarantee, so the port states
+  it; the port still knows nothing of Exposed or SQL.
+- **`DatabaseConfig` is a data class**, so its `toString()` would include the password. It is never logged.
+
+Sources: spec-vs-plan finding 10, adversarial-architecture findings 6 and 8 (full review), verify-findings-closed
+(push review).
+
 ## Testing
 
 - **Unit and integration tests, no mocks.** The domain has no dependencies to mock; the integration tests use the
@@ -189,8 +218,10 @@ adversarial-code (push review).
   themselves are pinned in the unit tests; the integration tests check the wiring. Source: test-quality (push review).
 - **Two lock tests.** One holds the row locks from a second connection and checks that an update waits and builds on
   the change; it was verified both ways (with `.forUpdate()` removed it fails, 1000.83 instead of 2001.67). The other
-  runs two updates at once and expects both months; it catches an update whose read and write are split into two
-  transactions (test-quality mutant N03, full review). On correct code both always pass.
+  runs two updates at once and expects both months; in the mutation run of the full review it caught an update whose
+  read and write were split into two transactions (test-quality mutant N03). It has no barrier, so on broken code it
+  fails only when the two updates overlap, which they did in that run. On correct code both tests always pass.
+  Source: test-quality and verify-findings-closed (push review).
 - **Lock order is not tested.** That updates lock rows in id order (so two updates cannot deadlock) is held by the
   code and a comment; a deadlock cannot be provoked reliably in a test. Source: test-quality (push and full review).
 - **The lock test waits for any blocked session** in `pg_stat_activity`, without filtering by database or session.
