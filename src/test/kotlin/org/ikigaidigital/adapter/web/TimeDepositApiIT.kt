@@ -89,6 +89,19 @@ class TimeDepositApiIT {
     }
 
     @Test
+    fun `two concurrent balance updates both apply`() = apiTest {
+        coroutineScope {
+            val first = async { client.post("/time-deposits/balance-updates") }
+            val second = async { client.post("/time-deposits/balance-updates") }
+            assertThat(first.await().status).isEqualTo(HttpStatusCode.NoContent)
+            assertThat(second.await().status).isEqualTo(HttpStatusCode.NoContent)
+        }
+
+        // Both months land only if the read and the write of each update share one locked transaction.
+        assertThat(balances()[1]).isEqualByComparingTo("1001.66")
+    }
+
+    @Test
     fun `a balance update waits for a concurrent change and builds on it`() = apiTest {
         connection().use { other ->
             other.autoCommit = false
