@@ -1,44 +1,54 @@
 # test-quality (push mode, read only)
 
-Range: 0bce5c7..33f165a. File: src/test/kotlin/org/ikigaidigital/adapter/web/TimeDepositApiIT.kt.
+Range: 33f165a..64d71b2. File: src/test/kotlin/org/ikigaidigital/adapter/web/TimeDepositApiIT.kt.
 No mutation runs in push mode. Mutation table: not run. Every finding is SUSPECTED.
 
-## Mutation results
-| Function | Mutation | Caught |
-| --- | --- | --- |
-| ExposedTimeDepositRepository.findAllForUpdate | drop `.forUpdate()` | SUSPECTED no (flaky at best), see 1 |
-| UpdateAllBalancesService.updateAllBalances | call `findAll()` instead of `findAllForUpdate()` | SUSPECTED no (flaky at best), see 1 |
-| ExposedTimeDepositRepository.findAllForUpdate | drop `.orderBy(id)` | SUSPECTED no, see 2 |
+Verdict: the new lock test is a real test. Reasoning by hand: without `forUpdate()` the POST reads 1000.00 under MVCC,
+its UPDATE then blocks on the other connection's row lock and overwrites 2000.00 with 1000.83, so the assertion
+(2001.67) fails. The full-state check on POST is also strong (all three plans, withdrawals untouched, 1004.17 and
+1000.83 are correct for Double + HALF_UP).
 
-Check for `full`: apply each mutation in a worktree and run `make test T=` / `make verify` about 20 times for the concurrency IT.
+### 1. Medium — the lock test can pass on broken code when the POST is slow
+- **Where**: TimeDepositApiIT.kt, `a balance update waits for a concurrent change and builds on it`, `delay(500)`.
+- **Problem**: the test assumes the POST has reached the lock within 500 ms. On a cold or loaded machine (first request,
+  Hikari warm-up, CI) the other connection commits 2000.00 first. The POST then reads 2000.00 with or without
+  `forUpdate()`, so the test goes green without the lock. The failure mode is a silent pass, not a flaky failure.
+- **Why it matters**: the lock is what stops lost balance updates; a test that only proves it on a fast machine
+  will not catch its removal in CI.
+- **Action**: instead of a fixed sleep, poll `pg_stat_activity` (`wait_event_type = 'Lock'`) until the POST is waiting,
+  with a timeout, then run the UPDATE and commit. In `full` mode: remove `.forUpdate()` and run the test
+  repeatedly under CPU load to see whether it ever stays green.
 
-### 1. High - SUSPECTED: concurrency test may pass without the lock
-- Where: TimeDepositApiIT.kt, `concurrent POSTs each add a month - no update is lost`
-- Problem: two `launch`ed POSTs through the in-memory testApplication client on a tiny 3-row table. The read-modify-write window is a few milliseconds and the launches may be serialised by the test dispatcher. Nothing forces the two transactions to overlap, so a missing `FOR UPDATE` probably passes most runs.
-- Why it matters: commit 9df7b3f exists only to fix this lost update, and the test is its sole regression guard (no unit test checks the service uses `findAllForUpdate`).
-- Action: in `full`, mutate away the lock and loop the test; if it passes, widen the window (more concurrent calls, e.g. 10-20, run on `Dispatchers.Default`) or hold the first transaction open with a JDBC `SELECT ... FOR UPDATE` plus a latch and assert the POST blocks until commit.
+### 2. Low — the lock is not shown to be held until the write
+- **Where**: UpdateAllBalancesService.kt (`findAllForUpdate` and `updateBalances` in one transaction), test above.
+- **Problem**: the test blocks the read and releases before the POST reads, so it cannot see a change that lands between
+  read and write. Splitting the use case into two transactions, or weakening the lock, still gives 2001.67
+  (SUSPECTED).
+- **Why it matters**: the atomic read-modify-write is the guarantee; only "read after the other commit" is proven.
+- **Action**: full mode: mutate to run the read and the write in separate `inTransaction` calls and see whether the
+  suite still passes. Add a test that commits a change after the POST has read but before it writes, or accept it as
+  covered by the transaction-runner design.
 
-### 2. Medium - SUSPECTED: lock-ordering (deadlock-avoidance) claim is untested
-- Where: ExposedTimeDepositRepository.kt `findAllForUpdate` comment; no test.
-- Problem: removing `orderBy(id)` leaves every test green, because concurrency is never reliably produced and rows are inserted in id order anyway.
-- Action: accept as documented-only, or cover it in the strengthened test from finding 1.
+### 3. Low — the concurrent-POST test was deleted, nothing covers two updates racing
+- **Where**: the removed `concurrent POSTs each add a month - no update is lost`.
+- **Problem**: the code comment claims locking in id order prevents deadlock between two updates. No test runs two
+  updates at once now. The old test was weak (the sequential non-idempotent test already asserts 1001.66), so the
+  loss is small.
+- **Why it matters**: removing `orderBy(id)` from `findAllForUpdate` would go unnoticed.
+- **Action**: full mode: drop `orderBy` in `findAllForUpdate` and run the suite; likely uncaught and acceptable
+  (a deadlock needs two rows locked in opposite order, hard to provoke deterministically).
 
-### 3. Low - POST responses are not asserted in the repeated and concurrent tests
-- Where: `POST is not idempotent` and `concurrent POSTs` ignore the response status. A 500 on the first call and success on the second would give 1000 + 0.83*1, not 1001.66, so the balance check does catch it indirectly; the status is still not checked.
-- Action: assert 204 on every call.
+### 4. Low — POST status is not checked in the lock test
+- **Where**: `launch { client.post(...) }`, response discarded.
+- **Problem**: a 500 response is only caught indirectly, because the balance would be 2000.00. Fine today, but an
+  assertion on 204 would make the intent explicit.
+- **Action**: capture the response and assert `NoContent`.
 
-### 4. Low - the balance check covers one row
-- Where: `balances()[1]` (premium) only. Rows 0 and 2 are not checked under concurrency (a lost update on the basic row would go unnoticed). Compare the whole map, e.g. basic 1001.66, premium 1008.34 (check the expected numbers), student 1000.00.
-
-### 5. Low - fixture notes
-- `apiTest` TRUNCATEs and re-seeds each test (good isolation). The container is shared via a companion `start()` and never stopped; Testcontainers' Ryuk handles cleanup.
-- Seed data is hand-built and mirrors the code's assumptions (31, 46 and 366 days). That is intentional boundary coverage but not the real demo data.
-- The expected values in the single-POST test (1000.83, 1004.17) are hardcoded, not derived from code. Good.
+### 5. Info — cost and style
+- `delay(500)` adds half a second to every run (resolved by finding 1). The `kotlinx.coroutines.delay` import is out of
+  alphabetical order, a style nit.
 
 ## Genuinely strong
-- GET and single-POST tests compare the full JSON body to literal expected values, and every response is validated against the OpenAPI contract. Both can fail.
-- The post-update state check (commit 77db64b) covers all three plans, the withdrawals and the unchanged student row.
-- Tests run against real PostgreSQL, with no mocks.
-
-## Not checked (push mode)
-Coverage numbers, whether `TimeDepositCalculatorTest` characterises the boundaries (30/31, 45/46, 365/366), and the mutation score of the domain code.
+- POST and GET compare the full JSON state of all three deposits and their withdrawals, with response validation
+  against the OpenAPI contract, on real PostgreSQL.
+- The non-idempotency test pins accumulation across two calls.
