@@ -18,6 +18,10 @@
         <logback.version>1.5.37</logback.version>
         <junit.version>5.12.2</junit.version>
         <assertj.version>3.27.3</assertj.version>
+        <exposed.version>1.4.0</exposed.version>
+        <flyway.version>11.20.0</flyway.version>
+        <postgresql.version>42.7.13</postgresql.version>
+        <hikari.version>7.0.2</hikari.version>
     </properties>
 
     <dependencyManagement>
@@ -67,6 +71,41 @@
             <groupId>io.ktor</groupId>
             <artifactId>ktor-server-swagger-jvm</artifactId>
             <version>${ktor.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.exposed</groupId>
+            <artifactId>exposed-core</artifactId>
+            <version>${exposed.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.exposed</groupId>
+            <artifactId>exposed-jdbc</artifactId>
+            <version>${exposed.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.exposed</groupId>
+            <artifactId>exposed-java-time</artifactId>
+            <version>${exposed.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>${flyway.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>${flyway.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>${hikari.version}</version>
         </dependency>
 
         <dependency>
