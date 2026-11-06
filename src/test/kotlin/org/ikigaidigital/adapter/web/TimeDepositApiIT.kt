@@ -21,6 +21,7 @@ import java.math.BigDecimal
 import java.sql.DriverManager
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 /** HTTP -> routes -> use cases -> Exposed -> PostgreSQL in Docker. Every response is checked against the contract. */
 class TimeDepositApiIT {
@@ -86,12 +87,21 @@ class TimeDepositApiIT {
     }
 
     @Test
-    fun `concurrent POSTs each add a month - no update is lost`() = apiTest {
-        coroutineScope {
-            repeat(2) { launch { client.post("/time-deposits/balance-updates") } }
+    fun `a balance update waits for a concurrent change and builds on it`() = apiTest {
+        connection().use { other ->
+            other.autoCommit = false
+            other.createStatement().use { it.execute("SELECT * FROM time_deposits FOR UPDATE") }
+            coroutineScope {
+                val update = launch { client.post("/time-deposits/balance-updates") }
+                delay(500) // the update reaches the lock and waits
+                other.createStatement().use { it.execute("UPDATE time_deposits SET balance = 2000.00 WHERE id = 1") }
+                other.commit()
+                update.join()
+            }
         }
 
-        assertThat(balances()[1]).isEqualByComparingTo("1001.66")
+        // With the lock the update reads 2000.00 (+1.67). Without it, it reads 1000.00 and overwrites with 1000.83.
+        assertThat(balances()[1]).isEqualByComparingTo("2001.67")
     }
 
     private fun apiTest(test: suspend ApplicationTestBuilder.() -> Unit) = testApplication {
