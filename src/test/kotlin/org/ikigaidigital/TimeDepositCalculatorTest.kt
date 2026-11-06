@@ -24,7 +24,12 @@ class TimeDepositCalculatorTest {
         "premium, 1000.00,    45,  1000.00", // interest starts after 45 days
         "premium, 1000.00,    46,  1004.17",
         "unknown, 1000.00,    100, 1000.00", // unknown plan types earn nothing
-        "basic,   6.00,       31,  6.01", // 0.005 is rounded HALF_UP
+        "basic,   6.00,       31,  6.01", // smallest balance that earns a cent
+        "basic,   150.00,     31,  150.13", // exact tie 0.125: HALF_UP, not HALF_EVEN or HALF_DOWN
+        "basic,   18.00,      31,  18.01", // 0.01499999...: BigDecimal(Double), not BigDecimal.valueOf
+        "student, 10.00,      31,  10.02", // 0.02499999...: arithmetic order balance * rate / 12
+        "premium, 3.60,       46,  3.62", // 0.01500000...1: arithmetic order balance * rate / 12
+        "Basic,   1000.00,    31,  1000.00", // plan types are case-sensitive, as in the original
     )
     fun `adds one month of interest according to the plan`(
         planType: String,
@@ -54,17 +59,28 @@ class TimeDepositCalculatorTest {
         )
     }
 
+    private val vipPolicy = object : InterestPolicy {
+        override val planType = "vip"
+        override fun monthlyInterest(deposit: TimeDeposit) = 10.0
+    }
+
     @Test
     fun `new plan types are supported by adding an interest policy`() {
-        val vipPolicy = object : InterestPolicy {
-            override val planType = "vip"
-            override fun monthlyInterest(deposit: TimeDeposit) = 10.0
-        }
         val calculator = TimeDepositCalculator(TimeDepositCalculator.defaultPolicies() + vipPolicy)
         val deposit = TimeDeposit(1, "vip", 1000.0, 31)
 
         calculator.updateBalance(listOf(deposit))
 
         assertThat(deposit.balance).isEqualTo(1010.0)
+    }
+
+    @Test
+    fun `new plan types earn nothing during the first 30 days`() {
+        val calculator = TimeDepositCalculator(TimeDepositCalculator.defaultPolicies() + vipPolicy)
+        val deposit = TimeDeposit(1, "vip", 1000.0, 30)
+
+        calculator.updateBalance(listOf(deposit))
+
+        assertThat(deposit.balance).isEqualTo(1000.0)
     }
 }
