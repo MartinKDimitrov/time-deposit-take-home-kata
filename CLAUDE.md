@@ -30,9 +30,6 @@ All build and test commands go through `make`; agents use only these targets (`m
 
 ## Architecture (hexagonal, single module)
 
-This is the target structure; it is built slice by slice (see `git log`). Packages that do not exist yet follow
-these rules when they are added.
-
 ```
 org.ikigaidigital
   TimeDeposit, TimeDepositCalculator   shared domain classes (original package kept)
@@ -93,5 +90,5 @@ org.ikigaidigital
 - Without Claude Code or a connection, the hook says what will not run and asks whether to continue.
   `SKIP_AI_GATE=1 git push` skips only the AI review; `git push --no-verify` skips every check.
 - When something is ambiguous, pick the most reasonable reading, implement it, and record it in
-  `docs/TRADEOFFS.md` (Assumptions section) and/or a code comment.
-- The human author writes and reviews all production code; the AI proposes, verifies and documents.
+  `docs/PRODUCT.md` (Assumptions) or `docs/TRADEOFFS.md`, and/or a code comment.
+- The AI proposes code, tests and documentation; the human author decides, types, reviews and runs every change.
