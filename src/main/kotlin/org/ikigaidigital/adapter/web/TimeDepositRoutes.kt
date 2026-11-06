@@ -21,6 +21,7 @@ fun Route.timeDepositRoutes(
             val timeDeposits = withContext(Dispatchers.IO) { getAllTimeDeposits.getAllTimeDeposits() }
             call.respond(timeDeposits.map { it.toResponse() })
         }
+        // 204 with no body; not idempotent - every call adds another month (A6, docs/PRODUCT.md#assumptions).
         post("/balance-updates") {
             withContext(Dispatchers.IO) { updateAllBalances.updateAllBalances() }
             call.respond(HttpStatusCode.NoContent)

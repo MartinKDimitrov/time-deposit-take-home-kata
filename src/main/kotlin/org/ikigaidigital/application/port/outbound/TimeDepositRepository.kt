@@ -2,6 +2,7 @@ package org.ikigaidigital.application.port.outbound
 
 import org.ikigaidigital.TimeDeposit
 
+/** Call inside [TransactionRunner.inTransaction]; implementations join that transaction. */
 interface TimeDepositRepository {
     /** All time deposits, ordered by id. */
     fun findAll(): List<TimeDeposit>

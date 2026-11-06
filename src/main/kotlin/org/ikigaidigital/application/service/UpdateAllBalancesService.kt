@@ -11,6 +11,9 @@ class UpdateAllBalancesService(
     private val transactionRunner: TransactionRunner,
 ) : UpdateAllBalancesUseCase {
 
+    // Only balances change: days are not advanced here (A4) and withdrawals do not affect interest (A5), see
+    // docs/PRODUCT.md#assumptions. The read and the write must stay in one transaction: findAllForUpdate holds the
+    // row locks until it ends, so concurrent updates cannot lose a month.
     override fun updateAllBalances() = transactionRunner.inTransaction {
         val timeDeposits = timeDepositRepository.findAllForUpdate()
         calculator.updateBalance(timeDeposits)

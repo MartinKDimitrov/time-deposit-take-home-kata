@@ -16,6 +16,7 @@ data class TimeDepositResponse(
     val withdrawals: List<WithdrawalResponse>,
 )
 
+/** A withdrawal nested in its deposit, so timeDepositId is implied and left out (A7, docs/PRODUCT.md#assumptions). */
 @Serializable
 data class WithdrawalResponse(
     val id: Int,
