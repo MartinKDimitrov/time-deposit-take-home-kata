@@ -1,108 +1,234 @@
-# Adversarial architecture review
+# adversarial-architecture
 
-- **Range:** `61783bc3de876d011002c4001ccc9800cf3953d3..c2dec64dcaa42e42a438c93e4daa484d0fcf264a`
-- **Scope:** `domain/interest/`, `TimeDepositCalculator.kt`, `.githooks/pre-push`, `.gitignore`, against `CLAUDE.md` at the tip
-- **Verdict:** **Domain design sound, keep it. Push gate does not do what `CLAUDE.md` says: fix findings 1-3 before relying on it.**
-- **Method:** import graph by script (imports plus same-package references, comments stripped). Hook logic run in a throwaway
-  repository with stubbed `make`, `claude` and `curl`. Probe tests and one `make verify` run in a private worktree, since removed.
-- **Layering tool:** none configured (no ArchUnit, Konsist, detekt or ktlint in `pom.xml`).
+Mode: full. Range: `c4ea358..HEAD` (working tree clean). Claims tested: `CLAUDE.md` "Architecture (hexagonal, single
+module)" and `docs/ARCHITECTURE.md`. The package import graph was built mechanically from every `package`/`import`
+line under `src/main/kotlin` (AST-free but exhaustive: 25 files, 0 skipped) and cycle-searched; Exposed's transaction
+resolution was confirmed from the bytecode of `exposed-jdbc-1.4.0.jar`. No file in the checkout was modified.
+
+Several candidate findings are already recorded as accepted in `docs/TRADEOFFS.md` (root package / `domain.interest`
+mutual reference, no layering test, `Dispatchers.IO`, default credentials, duplicate plan types, single module).
+Those are not re-litigated; findings 1, 2, 3 and 4 are new, and finding 1 corrects the recorded framing.
+
+## Architectural claims that are fully honoured
+
+Verified mechanically, not by impression:
+
+- **Domain and application are plain Kotlin.** Zero matches for `exposed`, `io.ktor`, `kotlinx.serialization`,
+  `javax.sql`, `hikari` or `flyway` under `domain/` and `application/`. The central claim of
+  `ARCHITECTURE.md:26-27` holds exactly.
+- **Adapters never know each other.** The graph contains no edge between `adapter.web` and `adapter.persistence`
+  in either direction.
+- **`Dispatchers.IO` is decided in the web adapter, and only there.** The only occurrences in main code are
+  `adapter/web/TimeDepositRoutes.kt:21` and `:25`. No `runBlocking`, no `suspend` leaking inward.
+- **`TransactionRunner` is the only application-level transaction entry point.** `transaction(` occurs once in main
+  code, at `adapter/persistence/ExposedTransactionRunner.kt:12`. Flyway at `config/TimeDepositModule.kt:25` is the
+  single other transaction opener and is documented as owning the schema.
+- **Exposed tables and DTOs stay in their adapter.** `TimeDepositsTable`/`WithdrawalsTable` are `internal`
+  (`Tables.kt:8,17`) and referenced only inside `adapter/persistence`; `@Serializable` appears only in
+  `adapter/web`, and `toResponse()` is `internal`/`private`.
+- **Wiring is manual and only in `config/`.** No package other than `org.ikigaidigital` (i.e. `Application.kt`)
+  imports `config`, and no package other than `config` constructs an adapter.
+- **No configuration sprawl.** `System.getenv` is read in exactly one place, `Application.kt:11-13`, and becomes a
+  `DatabaseConfig` value object. Nothing else reads the environment or system properties.
+- **No cycle-breaking tricks and no god objects.** There is not one function-level or lazy import in the codebase.
+  484 lines of main code across 25 files; the largest is `TimeDepositCalculator.kt` at 46 lines. Every class has one
+  responsibility; `GetAllTimeDepositsService` and `UpdateAllBalancesService` do nothing but orchestrate.
+- **The `*Test`/`*IT` split works through plugin defaults.** `TimeDepositApiIT` matches no Surefire default pattern,
+  so `make test` cannot pull Docker in.
+
+The inward direction of the layering is, at *file* granularity, honoured without exception. The findings below are
+about package granularity, hidden state and two invariants that are weaker than documented — not about the shape of
+the dependency arrows between web, application and persistence, which is correct.
 
 ## Findings
 
-### 1. High — `make verify` never runs `*IT` tests, yet reports that they passed (CONFIRMED)
+### 1. Medium — `Application.kt`, not the pinned classes, is what makes the root package un-layerable
 
-- **Where:** `pom.xml:54-57` (Surefire only, no Failsafe); `Makefile:17-19`; `.githooks/pre-push:3,28`; `CLAUDE.md:16,70`
-- **Problem:** `CLAUDE.md:70` says `*IT` runs under Failsafe in the `verify` phase, but Failsafe is not in the POM. A deliberately failing `DeliberatelyFailingIT` left `make verify` at exit 0, printing `OK: unit and integration tests passed`, with no `target/failsafe-reports`.
-- **Why it matters:** The first integration test added will be silently skipped, including the tests hard constraint 4 relies on to stop contract drift. The pre-push hook would then wave through a failing `*IT`.
-- **Action:** Add `maven-failsafe-plugin` (`integration-test` and `verify` goals) before the first `*IT` exists, and confirm a failing `*IT` turns `make verify` red.
+- **Where** `src/main/kotlin/org/ikigaidigital/Application.kt:5-6`; claims at `docs/ARCHITECTURE.md:33`,
+  `docs/ARCHITECTURE.md:46` vs `:51`, `docs/TRADEOFFS.md` ("`TimeDeposit` and `TimeDepositCalculator` stay in the
+  root package", "No layering test").
+- **Problem** CONFIRMED. `TRADEOFFS.md` attributes the root-package tangle to the two pinned classes, i.e. to
+  something unavoidable. The graph says otherwise. `Application.kt` adds `org.ikigaidigital -> config` and
+  `org.ikigaidigital -> adapter.persistence`, which makes the root package simultaneously the innermost layer
+  (Entities, `ARCHITECTURE.md:46`) and the outermost (Main, `ARCHITECTURE.md:51`). Cycle search over the package
+  graph returns **31 distinct cycle paths**; deleting `Application.kt` from the graph and re-running returns
+  exactly **2** — the unavoidable `org.ikigaidigital <-> domain.interest` pair. So 30 of 31 cycles come from one
+  file whose location no hard constraint pins (constraints 1 and 2 cover `TimeDeposit` and `TimeDepositCalculator`
+  only). The real upward reach is `domain.interest -> org.ikigaidigital -> config -> adapter.persistence -> Exposed`:
+  at package granularity the domain transitively reaches the database.
+- **Why it matters** This is the blocker for the ArchUnit/Konsist test `TRADEOFFS.md` names as "the first follow-up
+  worth adding". Any package-granular rule of the form "`domain..` must not depend on `adapter..`" fails today, and
+  it fails for a reason that has nothing to do with the assignment's constraints. The unavoidable residue
+  (`org.ikigaidigital <-> domain.interest`) is one declared exception a rule can whitelist; the current 31 cannot be
+  whitelisted without whitelisting the real violations too.
+- **Action** Move `fun main()` to `config/` (or a `bootstrap/` package). The root package then holds only the two
+  pinned domain classes, the graph becomes a DAG apart from one documented pair, and the layering test becomes
+  writable. Note `README.md:60-67` documents `org.ikigaidigital.ApplicationKt` as the entry point, so the README
+  command and `Makefile:22`'s sibling invocation move with it.
 
-### 2. High — A blocking AI review stops one push only; repeating `git push` gets through (CONFIRMED)
+### 2. Medium — the outbound ports hide a shared-state dependency between the repositories and the transaction runner
 
-- **Where:** `.githooks/pre-push:70-78`; `CLAUDE.md:85`
-- **Problem:** `CLAUDE.md:85` says the push stops until reports are committed. The hook records `$tip` as reviewed at line 73, before it looks at the reports, and the only stop signal is an uncommitted change under `docs/ai-reviews`. With a stubbed `VERDICT: BLOCK` report, the first push exited 1 and the identical second push exited 0 (`AI review already done`), the report still untracked.
-- **Why it matters:** The gate has no verdict channel, so a critical finding and a clean report behave the same. Signals are also wrong both ways: `claude` exiting 0 with no report gave `found nothing to report` and exit 0, and a stale uncommitted report stopped a push the review had not reported on.
-- **Action:** Advance the state only once reports are committed, or have `/quality-gate` write a machine-readable verdict that the hook checks. Otherwise document the stop as a reminder, not a gate.
+- **Where** `application/port/outbound/TimeDepositRepository.kt:5-13`, `.../WithdrawalRepository.kt:5-7`,
+  `.../TransactionRunner.kt:5`; implementations `adapter/persistence/ExposedTimeDepositRepository.kt:11-32`,
+  `ExposedWithdrawalRepository.kt:7-11`, `ExposedTransactionRunner.kt:10-12`.
+- **Problem** CONFIRMED from bytecode. `selectAll` is `selectAll(FieldSet)` and `update` is
+  `update(T, Function0, Integer, Function2)` — neither takes a transaction. `Query.getTransaction()` is a protected
+  ambient lookup, and `TransactionManager$Companion` exposes `getDefaultDatabase`/`setDefaultDatabase`,
+  `registerManager`, `closeAndUnregister` and `current()`. So the repositories obtain their connection from global +
+  thread-local state that `ExposedTransactionRunner` installs. Nothing in the three port signatures expresses this:
+  `findAll()` is a nullary function that compiles and type-checks anywhere and throws only at runtime outside a
+  transaction. The requirement survives as prose in two KDoc comments ("never called outside one") and in the port
+  doc at `TimeDepositRepository.kt:12`, which has to mention transactions and locks to describe a method whose type
+  mentions neither. Secondary: `Database.connect` (`ExposedTransactionRunner.kt:10`) mutates the global registry and
+  `closeAndUnregister` is never called anywhere — `config/TimeDepositModule.kt:24` closes the Hikari pool on
+  `ApplicationStopped` but leaves the Exposed registration behind, once per `timeDepositModule` call (four times in
+  `TimeDepositApiIT`).
+- **Why it matters** This is a dependency no diagram shows: `ARCHITECTURE.md:87-88` states it in prose, but the
+  contract that would enforce it is absent. It is correct today only because `withContext(Dispatchers.IO)` runs the
+  whole `inTransaction` block on one thread and `inTransaction(block: () -> T)` is non-suspending, so nothing can
+  hop threads mid-transaction. Both of those are accidents of the current call site, not guarantees of the port. A
+  future `async` inside a service, or a second `TransactionRunner` instance, silently changes which connection a
+  repository uses. PLAUSIBLE that this misbehaves rather than throws, because the ambient lookup can find *a*
+  transaction.
+- **Action** Cheapest honest fix: state the precondition on the port itself (KDoc on the interface, not only the
+  implementation) and add one integration test asserting that `ExposedTimeDepositRepository().findAll()` outside
+  `inTransaction` fails loudly. Structural fix (larger): give `inTransaction` a context receiver or pass a unit-of-
+  work handle the repositories require. Also call `TransactionManager.closeAndUnregister(database)` alongside
+  `dataSource.close()`.
 
-### 3. High — A multi-ref push checks only the last ref (CONFIRMED)
+### 3. Medium — `toMoney()` is not the single money conversion point it claims to be
 
-- **Where:** `.githooks/pre-push:13-20,25`
-- **Problem:** The read loop overwrites `base` and `tip` on each ref, so only the last one decides. Pushing a code branch then a docs-only branch exited 0 with no `make verify` and no AI review; the swapped order ran both. `main` with new code plus a tag on an already-pushed commit also exited 0 with nothing run.
-- **Why it matters:** `git push --all`, `--follow-tags` or `git push origin main v1.0` skips every check with no message, which contradicts `CLAUDE.md:81`. A release tag push is the moment the gate matters most.
-- **Action:** Evaluate each ref inside the loop, or accumulate every `base..tip` pair and fail if any ref needs checks.
+- **Where** `domain/Money.kt:6-10` ("this is the single conversion point"), `CLAUDE.md` ("Money outside the domain
+  is `BigDecimal` with scale 2; convert with `Double.toMoney()` only"), violated at
+  `adapter/web/TimeDepositResponses.kt:35`.
+- **Problem** CONFIRMED. Withdrawal amounts never pass through `toMoney()`. The path is
+  `withdrawals.amount NUMERIC(19,2)` -> `ExposedWithdrawalRepository.kt:17` -> `Withdrawal.amount: BigDecimal`
+  (`domain/Withdrawal.kt:9`) -> `WithdrawalResponse.amount` via `amount = amount`. The scale-2 property of every
+  amount the API emits therefore rests on the migration's column type
+  (`V1__create_time_deposit_tables.sql`), not on the stated conversion point. Nothing checks it: the contract
+  declares `type: number` with no `multipleOf` (`openapi/time-deposits.yaml:79-80`), so
+  `swagger-request-validator` would pass `500.0000`, and `BigDecimalAsNumberSerializer` prints whatever scale it is
+  handed (`toPlainString()`, line 23).
+- **Why it matters** Two money fields on the same response have two different and unequal guarantees, and the
+  weaker one is invisible. Widen the column to `NUMERIC(19,4)`, or source withdrawals from anywhere but this table,
+  and `balance` keeps two decimals while `amount` silently does not. The documented invariant is doing less work
+  than a reader of `Money.kt:8` would assume.
+- **Action** Either apply the scale at the boundary (`amount = amount.setScale(2, HALF_UP)` in `toResponse()`, or a
+  `BigDecimal.toMoney()` overload beside the `Double` one) or narrow the claim in `Money.kt:8` and `CLAUDE.md` to
+  "the single conversion point *from `Double`*", and say that `BigDecimal` money is scale-2 by database contract.
+  A `multipleOf: 0.01` in the contract would let the existing integration tests catch it.
 
-### 4. Medium — The 30-day rule stops "a new plan is a new class" for plans that pay early (CONFIRMED)
+### 4. Medium — every structural rule in CLAUDE.md is enforced by review only; the gate has no linter, coverage floor or dependency audit
 
-- **Where:** `TimeDepositCalculator.kt:14,28,38-39`; `CLAUDE.md:53-55`; `docs/ASSIGNMENT.md` ("for any existing plans", "extensible")
-- **Problem:** The assignment limits the 30-day rule to *existing* plans; the calculator applies it to every plan, including injected ones. A probe policy paying 10.0 on a 10-day deposit left the balance at 1000.0, with no error. `CLAUDE.md:54-55` states this choice, but it is a wider reading of the assignment and is not recorded as an assumption.
-- **Why it matters:** This is the extension the design advertises, and such a plan means editing the calculator, not adding a class. Its author also gets silent zero interest rather than a failure.
-- **Action:** Move the rule to a wrapper or base policy applied to the three existing plans, which leaves behaviour unchanged. Or keep it and record the assumption, and qualify the KDoc at line 14.
+- **Where** `pom.xml:150-209` (plugins: kotlin, surefire, failsafe, exec — nothing else), `Makefile:3`
+  (`help setup test verify run`), `.githooks/pre-commit:7`, `.githooks/pre-push:29`.
+- **Problem** CONFIRMED. There is no `check` target; the hooks call `make test`/`make verify` directly. The build
+  has no formatter or linter in check mode (no ktlint/detekt), no type-strictness flag
+  (`allWarningsAsErrors`/explicit API mode are not set, so the strictest setting the project can hold is not
+  taken), no coverage floor (no JaCoCo), no dependency or vulnerability audit (no `dependency:analyze`, no OWASP
+  check), and no layering tool. So the rules in the "Code style" and "Architecture" sections of `CLAUDE.md` — no
+  magic numbers, no unused code, inward-only dependencies, no Ktor/Exposed in the domain — have no mechanical
+  guard at all.
+- **Why it matters** `TRADEOFFS.md` records "No layering test" as an accepted gap, but the gap is wider than that
+  one entry: the standing project rules for a commit gate name a linter, a coverage floor and a dependency audit as
+  required rows, and none of the three exists. The architecture is currently clean (see the honoured list), which
+  is exactly when the enforcement is cheapest to add and hardest to justify adding — and the only thing standing
+  between it and drift is that every change so far has been reviewed by hand.
+- **Action** Add a `make check` target that `pre-commit`/`pre-push`/CI all call, and put at least `allWarningsAsErrors`
+  plus `mvn dependency:analyze` in it today (both are free). Then Konsist or ArchUnit for the layering rule — after
+  finding 1, or it cannot express the rule. Record the remaining omissions in `TRADEOFFS.md` with reasons, the way
+  "No layering test" already is.
 
-### 5. Medium — `CLAUDE.md` describes most of the architecture in the present tense, but it does not exist (CONFIRMED)
+### 5. Low — the ARCHITECTURE.md package table is wrong in three of its nine rows
 
-- **Where:** `CLAUDE.md:8-9,17,28,36-42,50,90`; `pom.xml:36,85,91`; `Makefile:22`
-- **Problem:** The docs say Kotlin 2.3, Ktor, Exposed, PostgreSQL, Flyway and Testcontainers; the POM has Kotlin 1.7.20 and none of the others. Missing: `application/`, `adapter/`, `config/`, `Money`, `Withdrawal`, `toMoney()`, `TransactionRunner`, the OpenAPI contract, `docs/TRADEOFFS.md` and any `*IT`. `make run` targets `LocalApplicationKt`, which does not exist.
-- **Why it matters:** Those layering rules hold only because the code is absent, so they are untested. AI agents treat this file as fact, and `CLAUDE.md:90` sends assumptions to a file that does not exist, which is how finding 4 went unrecorded.
-- **Action:** Mark the target state as planned, or add a "built so far" line, until the slices land. Create `docs/TRADEOFFS.md` now.
+- **Where** `docs/ARCHITECTURE.md:33`, `:34`, `:38`.
+- **Problem** CONFIRMED against the graph. Row `org.ikigaidigital` says "Depends on: domain"; it also depends on
+  `adapter.persistence` and `config` and imports Ktor (`Application.kt:3-6`). Row `domain` says "Depends on:
+  nothing"; `domain/interest` imports `org.ikigaidigital.TimeDeposit` in all four of its files
+  (`InterestPolicy.kt:3`, `BasicInterestPolicy.kt:3`, `PremiumInterestPolicy.kt:3`, `StudentInterestPolicy.kt:3`).
+  Row `adapter/web` says "Depends on: inbound ports"; it also depends on `domain`
+  (`TimeDepositResponses.kt:5-6`). The diagram at `:9-21` likewise omits the `adapter/web -> domain` edge.
+- **Why it matters** This table is the most likely input to the layering test and the first thing a reviewer
+  compares the code against. Two of the three errors understate real edges, so a rule written from the table would
+  fail on correct code; the `domain` row contradicts `TRADEOFFS.md`, which does acknowledge the mutual reference.
+- **Action** Correct the three cells: root package depends on `domain`, `config`, `adapter/persistence`, Ktor (or,
+  after finding 1, on `domain` only); `domain` depends on "the pinned root-package classes"; `adapter/web` depends
+  on "inbound ports, domain". Add the `adapter/web -> domain` arrow to the diagram.
 
-### 6. Medium — The policy contract is held by a comment: public policies give wrong answers and receive a mutable deposit (CONFIRMED)
+### 6. Low — the composition root migrates the schema, and that ordering leaks into the tests
 
-- **Where:** `InterestPolicy.kt:8-10,15`; `BasicInterestPolicy.kt:8-9`; `StudentInterestPolicy.kt:8-9`; `TimeDepositCalculator.kt:23,28`
-- **Problem:** "Not meant to be called directly" is unenforced on public classes: `BasicInterestPolicy` returns 0.83 and `StudentInterestPolicy` 2.5 for a 10-day deposit of 1000.0. Reading one plan takes two files, since Student's 31-365 window is split between policy and calculator. Policies also get the mutable `TimeDeposit`; a policy that set the balance to 5.0 and returned 1.0 ended at 1001.0, because line 23 reads the balance first.
-- **Why it matters:** The first caller wanting a preview or a report will use a policy directly and get interest the business rule forbids. The ordering assumption appears in no signature.
-- **Action:** Make the three policies `internal`, or fix via finding 4. Pass `balance` and `days` rather than the deposit, since `TimeDeposit` itself is pinned.
+- **Where** `config/TimeDepositModule.kt:23-25` and `:34-37`; leak visible at
+  `src/test/kotlin/.../TimeDepositApiIT.kt:110-112`.
+- **Problem** CONFIRMED. `timeDepositModule` is not only wiring: it creates a connection pool, **runs Flyway**, and
+  configures two web concerns (the JSON plugin and the Swagger path plus the contract filename). The migration side
+  effect is the one that escapes: because the schema appears only once the module has been installed *and started*,
+  `TimeDepositApiIT` must call `startApplication()` before inserting data, with a comment saying exactly that
+  ("runs the Flyway migrations before the test data goes in"). `ARCHITECTURE.md:40` admits config "creates
+  everything and installs the routes and Swagger UI", so the web part is documented; the migrate-on-install part
+  is not.
+- **Why it matters** A composition root that performs I/O cannot be composed without performing that I/O. Every
+  current caller wants it, so the cost today is one ordering constraint on tests — but it is a responsibility
+  (schema lifecycle) sitting in the one file whose documented job is "wires adapters to use cases", and the test
+  comment is the evidence that a caller had to learn about it.
+- **Action** Either accept it explicitly in `TRADEOFFS.md` ("the composition root migrates on start; tests must
+  start the application first") or lift `migrate(...)` to the two entry points (`Application.kt`,
+  `LocalApplication.kt`) that already own the `DatabaseConfig`, leaving the module to wiring.
 
-### 7. Medium — The hooks test the working tree, not the commits being pushed (CONFIRMED)
+### 7. Low — `InterestPolicy` is public but has a precondition only the calculator satisfies
 
-- **Where:** `.githooks/pre-push:28`; `.githooks/pre-commit:6`
-- **Problem:** Nothing checks out `$tip` before `make verify`. Pushing branch `code` with `main` checked out, the stub logged `HEAD` at the base commit while the range under review ended at the pushed tip. `pre-commit` likewise tests the working tree, not the index.
-- **Why it matters:** A new class left unstaged passes both hooks while the pushed commit fails to compile, and pushing a non-current branch verifies the wrong code entirely.
-- **Action:** Run `make verify` in a temporary worktree at `$tip`, or at minimum abort when the tree is dirty or `HEAD` differs from `$tip`.
+- **Where** `domain/interest/InterestPolicy.kt:8-10,12-16`; enforcement at `TimeDepositCalculator.kt:31`.
+- **Problem** CONFIRMED, and partly recorded in `TRADEOFFS.md` ("The 30-day rule lives in the calculator"). The
+  interface is `public` while all three implementations are `internal`, so the only extension point reachable from
+  outside the module is the one carrying an unstated precondition: `monthlyInterest(deposit)` returns a wrong
+  answer for `days <= 30` unless the caller filters first. The KDoc says policies "are not meant to be called
+  directly" — a protocol whose documentation asks callers not to use it. `TimeDepositCalculatorTest` implements the
+  interface directly, so the extension path is real, not hypothetical.
+- **Why it matters** `CLAUDE.md` says a new interest plan is a new `InterestPolicy`. An implementer following that
+  instruction from outside the module sees a `TimeDeposit` parameter with a `days` field and no hint that `days` has
+  already been screened. The three shipped implementations have identical shape, so the protocol itself is honoured;
+  it is the ordering assumption that is smuggled in.
+- **Action** Narrow the parameter to what a policy may legitimately use (`balance`, `days`) or make the interface
+  `internal` and expose plan registration through a function in the root package, so the precondition cannot be
+  reached unguarded. If neither, say in the KDoc that the contract is "called only for `days > 30`".
 
-### 8. Medium — The gate cannot see changes to itself (CONFIRMED)
+### 8. Low — `findAllForUpdate` puts pessimistic locking in the vocabulary of an application port
 
-- **Where:** `.githooks/pre-push:9`; `.githooks/pre-commit:4`; `.claude/commands/quality-gate.md:31-39`
-- **Problem:** `code_paths` omits `.githooks`, `.claude`, `mvnw` and `mvnw.cmd`, and is duplicated across two hooks. A push replacing `pre-push` with `exit 0`, and a push rewriting `mvnw`, each exited 0 with no check. Because `CLAUDE.md`, `docs/` and `.claude/` are also excluded, a docs-only push never reaches the `spec` and `docs` classes from the hook.
-- **Why it matters:** The gate and the build wrapper can change unreviewed, though `mvnw` is plainly a build file under the `CLAUDE.md:80-81` skip rule. The hook-driven range gets `spec` and `docs` review only when code changes too.
-- **Action:** Add `.githooks`, `.claude`, `mvnw` and `mvnw.cmd`, and keep the list in one place both hooks read. State in `CLAUDE.md` that docs-only pushes need a manual `/quality-gate`.
+- **Where** `application/port/outbound/TimeDepositRepository.kt:12-13`, chosen at
+  `application/service/UpdateAllBalancesService.kt:15`; claim at `docs/ARCHITECTURE.md:87`.
+- **Problem** CONFIRMED but defensible. `ARCHITECTURE.md:87` says "the application layer does not know Exposed",
+  which is true — but the application layer does know about row locking: the service has to pick `findAllForUpdate()`
+  over `findAll()`, and the port's own doc comment has to explain locks and transaction lifetime to describe the
+  difference. Two methods differing only by an isolation strategy is a database capability surfacing in the port.
+- **Why it matters** Small and arguably correct — "this use case must serialise against concurrent updates" is a
+  business requirement, not a technology detail, and the alternative (an in-port isolation-level enum, or doing it
+  inside `updateBalances`) is worse. Worth recording rather than changing, because the doc's phrasing invites the
+  reader to expect a stronger separation than exists.
+- **Action** Reword `ARCHITECTURE.md:87` to "does not know Exposed, but does declare that the balance update needs
+  serialised access", or rename to express intent rather than mechanism (`findAllForSerialisedUpdate`).
 
-### 9. Low — Constructor injection replaces plans, and a wiring mistake looks like an unknown plan (CONFIRMED)
+### 9. Low — `BigDecimalAsNumberSerializer.deserialize` is unreachable
 
-- **Where:** `TimeDepositCalculator.kt:17-19,30,41-42`; `CLAUDE.md:49,53`
-- **Problem:** `TimeDepositCalculator(listOf(vip))` drops the defaults, and a `basic` deposit stayed at 1000.0 with no signal, because `?: 0.0` cannot tell a wiring gap from an unknown plan. `associateBy` also lets a duplicate plan type win silently (1099.0 in the probe). `defaultPolicies()` in the domain conflicts in letter with "wiring in `config/` only", though hard constraint 2 forces it.
-- **Why it matters:** Once `config/` exists, one wiring error stops interest for a whole plan while every test of the new plan passes. Hard constraint 2 requires `?: 0.0`, but not the silent duplicate.
-- **Action:** Reject duplicate plan types at construction; this is wiring, not the invalid input hard constraint 5 excludes. Say in `CLAUDE.md:53` that injection must include `defaultPolicies()`, and note the `defaultPolicies()` exception at line 49.
+- **Where** `adapter/web/BigDecimalAsNumberSerializer.kt:25-26`.
+- **Problem** CONFIRMED. Neither endpoint has a request body (`openapi/time-deposits.yaml` contains no
+  `requestBody`), and no test decodes into `TimeDepositResponse`/`WithdrawalResponse` — `TimeDepositApiIT` compares
+  with `Json.parseToJsonElement` on raw text. Nothing in main or test code ever deserializes a `BigDecimal` through
+  this serializer. `CLAUDE.md` says "no unused code".
+- **Why it matters** Minimal — `KSerializer` requires the member, so it cannot simply be deleted. The point is that
+  the line is untested and unreachable while looking like live behaviour, and it would be the first thing to break
+  silently if a request body were ever added.
+- **Action** Leave it and say so, or make the unreachability explicit:
+  `override fun deserialize(decoder: Decoder): Nothing = throw UnsupportedOperationException("responses only")`.
 
-### 10. Low — Nothing enforces the layering, and packages form a cycle that a generic rule would flag (CONFIRMED)
+### 10. Low — the lock test observes a cluster-wide condition
 
-- **Where:** `CLAUDE.md:45`; `pom.xml:81-104`; `TimeDepositCalculator.kt:3-6`; `BasicInterestPolicy.kt:3`, `InterestPolicy.kt:3`, `PremiumInterestPolicy.kt:3`, `StudentInterestPolicy.kt:3`
-- **Problem:** A single Maven module means the compiler cannot stop `domain` importing Ktor or Exposed. `org.ikigaidigital` and `org.ikigaidigital.domain.interest` import each other. There is no class-level cycle, and `CLAUDE.md:51-52` explains the cause.
-- **Why it matters:** Today's clean graph is true only by discipline, and that is about to be tested as adapters land. `INTEREST_FREE_DAYS` is public with no outside user, which invites a policy to import the calculator and create a real cycle.
-- **Action:** Add a small layering test when the first adapter lands, stating the reason as `CLAUDE.md` requires, with the root package treated as domain. Make `INTEREST_FREE_DAYS` private.
-
-## Architectural claims tested
-
-| Claim                                                                  | Result             | Evidence                                                                              |
-| ---------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------- |
-| Domain is plain Kotlin, no Ktor, Exposed or serialization              | Honoured           | Only `java.math` and `org.ikigaidigital` imports in `src/main`                        |
-| Dependencies point inwards                                             | Honoured           | No violations; only domain code exists                                                |
-| `TimeDeposit` unchanged (constraint 1)                                 | Honoured           | Not in the range diff                                                                 |
-| `updateBalance` signature and no-arg constructor (constraint 2)        | Honoured           | `javap` shows both public                                                             |
-| `updateBalance` exact arithmetic and rounding (constraint 2)           | Honoured (read)    | `balance * rate / 12` order, guards and `BigDecimal(Double)` traced against original  |
-| Policies hold plan-specific rules only                                 | Honoured           | Each holds rate and threshold; shared arithmetic is in `monthlyShare`                 |
-| 30-day period enforced by the calculator                               | Honoured           | `TimeDepositCalculator.kt:28`; scope questioned in finding 4                          |
-| All policies have the same shape                                       | Honoured           | One property, one method, no extra parameters or side effects                         |
-| New plan by `defaultPolicies()` or constructor                         | Partly             | Works from day 31 only (finding 4); injection replaces (finding 9)                    |
-| No hidden state, no direct environment reads                           | Honoured           | No globals, `getenv` or properties; `TimeDeposit.balance` is the only mutation        |
-| No god objects, no cycle-breaking imports                              | Honoured           | Largest file is 44 lines; no function-level imports; no class-level cycle             |
-| `SKIP_AI_GATE=1` and `--no-verify` behave as stated                    | Honoured (read)    | `.githooks/pre-push:30-33`; `--no-verify` is native git                               |
-| No Claude or connection: hook says so and asks                         | Honoured (read)    | `.githooks/pre-push:50-67`; aborts without a TTY                                      |
-| Only changes not yet reviewed are reviewed again                       | Honoured           | Ancestor checks fall back to the full range after a rebase                            |
-| Push stops on reports; skipped only without code or build files        | **Not honoured**   | Findings 2, 3 and 8                                                                   |
-| `make verify` runs `*IT` under Failsafe                                | **Not honoured**   | Finding 1                                                                             |
-| Adapter, `config/`, Money, transaction and contract rules              | Untestable         | Code does not exist (finding 5)                                                       |
-| `.gitignore` entry for `.claude/worktrees/`                            | Fine               | Matches a live worktree; no tracked file affected                                     |
-
-## Limits of this review
-
-- Differential old-versus-new testing of `updateBalance` was not run here; that claim rests on reading the code and on the characterization tests, which passed in the `make verify` run.
-- Hook results come from stubs, so they prove the hook's control flow, not the behaviour of the real `claude` or `make`.
+- **Where** `src/test/kotlin/.../TimeDepositApiIT.kt:158-165`.
+- **Problem** CONFIRMED, and already recorded in `TRADEOFFS.md` ("The lock test waits for any blocked session").
+  Noted here only for its architectural shape: `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type =
+  'Lock'` is unfiltered by database, pid or relation, so the test's synchronisation reads global server state
+  rather than its own. The four tests in the class share one container (`:30`) and reset it with `TRUNCATE` at
+  `:112`, so correctness depends on tests not running in parallel.
+- **Why it matters** The accepted reasoning ("only the test's own sessions run against the test database") is
+  sound today and would stop being sound the moment Failsafe gets a parallel configuration or a second IT class
+  shares the container. It is a latent coupling to a global, not a current defect.
+- **Action** Filter the query by `datname = current_database()` and `pid <> pg_backend_pid()` — a one-line change
+  that makes the existing assumption explicit instead of ambient.
