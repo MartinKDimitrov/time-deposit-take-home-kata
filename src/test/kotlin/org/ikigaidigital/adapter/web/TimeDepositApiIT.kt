@@ -11,6 +11,9 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import org.assertj.core.api.Assertions.assertThat
 import org.ikigaidigital.adapter.persistence.DatabaseConfig
@@ -19,9 +22,6 @@ import org.junit.jupiter.api.Test
 import org.testcontainers.postgresql.PostgreSQLContainer
 import java.math.BigDecimal
 import java.sql.DriverManager
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
 
 /** HTTP -> routes -> use cases -> Exposed -> PostgreSQL in Docker. Every response is checked against the contract. */
 class TimeDepositApiIT {
@@ -31,6 +31,8 @@ class TimeDepositApiIT {
         private val databaseConfig = DatabaseConfig(postgres.jdbcUrl, postgres.username, postgres.password)
         private val contract =
             OpenApiInteractionValidator.createForSpecificationUrl("openapi/time-deposits.yaml").build()
+        private const val LOCK_WAIT_ATTEMPTS = 100 // up to 5 seconds
+        private const val LOCK_WAIT_POLL_MILLIS = 50L
     }
 
     @Test
@@ -92,11 +94,11 @@ class TimeDepositApiIT {
             other.autoCommit = false
             other.createStatement().use { it.execute("SELECT * FROM time_deposits FOR UPDATE") }
             coroutineScope {
-                val update = launch { client.post("/time-deposits/balance-updates") }
-                delay(500) // the update reaches the lock and waits
+                val update = async { client.post("/time-deposits/balance-updates") }
+                awaitUpdateWaitingForLock()
                 other.createStatement().use { it.execute("UPDATE time_deposits SET balance = 2000.00 WHERE id = 1") }
                 other.commit()
-                update.join()
+                assertThat(update.await().status).isEqualTo(HttpStatusCode.NoContent)
             }
         }
 
@@ -140,6 +142,24 @@ class TimeDepositApiIT {
         connection.createStatement().use { statement ->
             statement.executeQuery("SELECT id, balance FROM time_deposits ORDER BY id").use { rows ->
                 buildMap { while (rows.next()) put(rows.getInt("id"), rows.getBigDecimal("balance")) }
+            }
+        }
+    }
+
+    /** Polls PostgreSQL until the balance update is blocked on a row lock, instead of sleeping for a guessed time. */
+    private suspend fun awaitUpdateWaitingForLock() {
+        repeat(LOCK_WAIT_ATTEMPTS) {
+            if (sessionsWaitingForLock() > 0) return
+            delay(LOCK_WAIT_POLL_MILLIS)
+        }
+        error("The balance update never waited for the row lock")
+    }
+
+    private fun sessionsWaitingForLock(): Int = connection().use { connection ->
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'").use { rows ->
+                rows.next()
+                rows.getInt(1)
             }
         }
     }
